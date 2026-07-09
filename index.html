@@ -3,13 +3,13 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PolyScan — Polymarket Wallet Profitability Scanner</title>
+  <title>MarkyScan - Polymarket Wallet Profitability Scanner</title>
   <link rel="stylesheet" href="styles.css" />
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔎</text></svg>" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%234f8cff'/><text x='50' y='74' font-size='68' text-anchor='middle' fill='white' font-family='Arial,sans-serif' font-weight='bold'>M</text></svg>" />
 </head>
 <body>
   <header>
-    <div class="logo">Poly<span>Scan</span></div>
+    <div class="logo">Marky<span>Scan</span></div>
     <div class="tagline">Find the most profitable wallets in any Polymarket event or category</div>
   </header>
 
@@ -36,7 +36,7 @@
       </div>
 
       <div id="panel-category" class="hidden">
-        <label for="category-select">Market category — scans the top open events by 24h volume</label>
+        <label for="category-select">Market category - scans the top open events by 24h volume</label>
         <div class="input-row">
           <select id="category-select">
             <option value="sports">Sports</option>
@@ -59,7 +59,7 @@
       </div>
 
       <div id="panel-btc" class="hidden">
-        <label for="btc-tf">Bitcoin Up/Down time-frame — scans every market in the lookback window</label>
+        <label for="btc-tf">Bitcoin Up/Down time-frame - scans every market in the lookback window</label>
         <div class="input-row">
           <select id="btc-tf">
             <option value="5m" selected>5-minute markets</option>
@@ -127,24 +127,24 @@
 
         <div class="filter-group">
           <span class="filter-title">Wallet type (win metrics)</span>
-          <label class="check"><input type="checkbox" id="win-metrics" /> Compute (slower — extra lookups per wallet)</label>
+          <label class="check"><input type="checkbox" id="win-metrics" /> Compute (slower - extra lookups per wallet)</label>
           <select id="wallet-type">
             <option value="">Preset…</option>
-            <option value="longshot">🎯 Longshot hunters — avg win ≥ 500%</option>
-            <option value="grinder">📈 Steady grinders — win rate ≥ 70%</option>
-            <option value="roi">💰 High ROI — ROI ≥ 30%</option>
+            <option value="longshot">Longshot hunters - avg win ≥ 500%</option>
+            <option value="grinder">Steady grinders - win rate ≥ 70%</option>
+            <option value="roi">High ROI - ROI ≥ 30%</option>
           </select>
-          <label class="inline-label">min ROI <input type="number" id="min-roi" class="pct" placeholder="—" />%</label>
-          <label class="inline-label">min win rate <input type="number" id="min-winrate" min="0" max="100" class="pct" placeholder="—" />%</label>
-          <label class="inline-label">min avg win <input type="number" id="min-avgwin" min="0" class="pct" placeholder="—" />%</label>
-          <label class="inline-label" title="Gross gains ÷ gross losses across decided bets. 1.11 = gives back 90% of what it gains; 2 = keeps twice what it loses back.">min gain/loss <input type="number" id="min-plratio" min="0" step="0.1" class="pct" placeholder="—" />×</label>
+          <label class="inline-label">min ROI <input type="number" id="min-roi" class="pct" placeholder="-" />%</label>
+          <label class="inline-label">min win rate <input type="number" id="min-winrate" min="0" max="100" class="pct" placeholder="-" />%</label>
+          <label class="inline-label">min avg win <input type="number" id="min-avgwin" min="0" class="pct" placeholder="-" />%</label>
+          <label class="inline-label" title="Gross gains ÷ gross losses across decided bets. 1.11 = gives back 90% of what it gains; 2 = keeps twice what it loses back.">min gain/loss <input type="number" id="min-plratio" min="0" step="0.1" class="pct" placeholder="-" />×</label>
         </div>
 
         <div class="filter-group">
           <span class="filter-title">Exclude arbers / edgers</span>
           <label class="inline-label">
             Max
-            <input type="number" id="max-arb" min="0" max="100" placeholder="—" class="pct" />
+            <input type="number" id="max-arb" min="0" max="100" placeholder="-" class="pct" />
             % of trades on opposite sides of the same market (Over↔Under, Up↔Down…)
           </label>
         </div>
@@ -207,7 +207,7 @@
 
   <script src="app.js"></script>
   <script>
-    // Vercel Web Analytics — skipped during local development
+    // Vercel Web Analytics - skipped during local development
     if (!['localhost', '127.0.0.1'].includes(location.hostname)) {
       const s = document.createElement('script');
       s.defer = true;

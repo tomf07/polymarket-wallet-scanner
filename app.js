@@ -1,7 +1,7 @@
 'use strict';
 
 /* ============================================================
- * PolyScan — scan every wallet in a Polymarket event and rank
+ * MarkyScan - scan every wallet in a Polymarket event and rank
  * them by profitability (7d / 30d / all-time).
  *
  * Uses only Polymarket public APIs (all CORS-enabled):
@@ -33,7 +33,7 @@ const CATEGORY_LABELS = {
 const CAT_MARKETS_PER_EVENT = 12; // per event, keep category scans bounded (top by volume)
 
 const MAX_BTC_MARKETS = 300; // hard cap per BTC time-frame scan
-const SLUG_BATCH = 20; // gamma /events accepts repeated slug params — batch lookups
+const SLUG_BATCH = 20; // gamma /events accepts repeated slug params - batch lookups
 
 /** ET calendar parts for a unix ts (BTC hourly/daily slugs are ET-based). */
 function etParts(ts) {
@@ -125,8 +125,8 @@ const state = {
   rows: [], // ranked result rows
   sortKey: 'd7',
   activeWindow: 'd7',
-  mode: 'trades', // 'trades' | 'holders' — how wallets were discovered/ranked
-  scanMode: 'event', // 'event' | 'category' — which main tab drives the scan
+  mode: 'trades', // 'trades' | 'holders' - how wallets were discovered/ranked
+  scanMode: 'event', // 'event' | 'category' - which main tab drives the scan
   betsSortMode: null, // null = auto from filters; 'pct' | 'usd' once the user picks
 };
 
@@ -201,7 +201,7 @@ function esc(s) {
 }
 
 function fmtUsd(n) {
-  if (n == null || Number.isNaN(n)) return '—';
+  if (n == null || Number.isNaN(n)) return '-';
   const abs = Math.abs(n);
   const s =
     abs >= 1e6 ? (abs / 1e6).toFixed(2) + 'M' :
@@ -280,7 +280,7 @@ async function loadEvent(parsed) {
   if (!event) return null;
 
   // Sports games split props into a sibling "<slug>-more-markets" event
-  // (spreads, over/under, both-teams-to-score, corners, etc.) — merge them in.
+  // (spreads, over/under, both-teams-to-score, corners, etc.) - merge them in.
   const slug = event.slug || parsed.slug;
   const siblingSlug = slug.endsWith('-more-markets')
     ? slug.replace(/-more-markets$/, '')
@@ -324,7 +324,7 @@ async function loadCategoryEvent() {
     for (const m of ms) markets.push({ ...m, evTitle: ev.title || 'Event' });
   }
   return {
-    title: `Top wallets — ${label}`,
+    title: `Top wallets - ${label}`,
     icon: evs[0].icon || evs[0].image,
     volume24h: evs.reduce((s, e) => s + (e.volume24hr || 0), 0),
     scanEventIds: evs.map((e) => e.id).filter(Boolean),
@@ -335,7 +335,7 @@ async function loadCategoryEvent() {
 }
 
 /** BTC mode: enumerate every Bitcoin Up/Down market of one time-frame in the
- *  lookback window (slugs are deterministic — timestamps or ET dates), resolve
+ *  lookback window (slugs are deterministic - timestamps or ET dates), resolve
  *  them in batched gamma lookups, and flatten into one scan target. */
 async function loadBtcEvent() {
   const tf = BTC_TIMEFRAMES[els.btcTf.value] || BTC_TIMEFRAMES['5m'];
@@ -376,7 +376,7 @@ async function loadBtcEvent() {
     }
   }
   return {
-    title: `BTC Up or Down — ${tf.label} markets, last ${hours}h`,
+    title: `BTC Up or Down - ${tf.label} markets, last ${hours}h`,
     icon: events[0].icon || events[0].image,
     volume24h: events.reduce((s, e) => s + (Number(e.volume) || 0), 0),
     scanEventIds: [], // too many events for per-event position lookups (holders arb check inert)
@@ -530,7 +530,7 @@ async function fetchWalletPnl(addr) {
  *  - avgWinPct  mean % return on the winning bets (500%+ ⇒ longshot hunter)
  *
  *  A "bet" = all activity in one market: cost = buys, proceeds = sells + redeems
- *  (REDEEM events carry no outcome, so market-level books are the reliable unit —
+ *  (REDEEM events carry no outcome, so market-level books are the reliable unit -
  *  this also nets out hedged wallets correctly). A bet is closed when it was fully
  *  traded out, redeemed, or is no longer among the wallet's open positions
  *  (resolved worthless). Still-open bets are ignored. History is capped at
@@ -644,7 +644,7 @@ async function fetchWalletWinMetrics(addr, deep = false, onProgress = null) {
     // decided but unclaimed: still held, but either every position is ~worthless
     // (win-rate gaming: losers left open forever) or it's a resolved, redeemable win
     const decided = !!open && (open.allDead || open.redeemable);
-    if (!exited && !resolved && !decided) continue; // genuinely open — not scored
+    if (!exited && !resolved && !decided) continue; // genuinely open - not scored
     closed++;
     const residual = !exited && open ? open.value : 0; // ≈0 for dead, ≈$1/share for unclaimed wins
     const retPct = ((b.proceeds + residual - b.cost) / b.cost) * 100;
@@ -874,7 +874,7 @@ async function rankAndFetchPnl() {
   // wallets, until the quota is filled (checking up to 5× topN candidates).
   const candidates = ranked.slice(0, anyFilter ? Math.min(ranked.length, Math.max(topN * 5, 300)) : topN);
 
-  setStatus(`Found ${agg.size.toLocaleString()} wallets — analyzing top ${Math.min(topN, candidates.length)}…`, 42);
+  setStatus(`Found ${agg.size.toLocaleString()} wallets - analyzing top ${Math.min(topN, candidates.length)}…`, 42);
 
   let accepted = 0;
   let skipped = 0;
@@ -891,14 +891,14 @@ async function rankAndFetchPnl() {
   await pool(candidates, PNL_CONCURRENCY, async (w) => {
     if (accepted >= topN) return; // quota already filled
 
-    // 1. arb/edger gate — trades mode: free (trade stances already counted)
+    // 1. arb/edger gate - trades mode: free (trade stances already counted)
     if (f.maxArb != null && w.arbPct != null && w.arbPct > f.maxArb) {
       skipped++;
       progress();
       return;
     }
 
-    // 2. profile views gate — 1 cheap call before the 3 PnL calls
+    // 2. profile views gate - 1 cheap call before the 3 PnL calls
     const stats = await fetchWalletStats(w.addr);
     const views = stats ? stats.views : null;
     if (f.maxViews != null && (views == null || views > f.maxViews)) {
@@ -907,7 +907,7 @@ async function rankAndFetchPnl() {
       return;
     }
 
-    // 2b. arb/edger gate — holders mode: check the wallet's own positions
+    // 2b. arb/edger gate - holders mode: check the wallet's own positions
     // for both-sides holdings in this event (1 call per wallet)
     if (state.mode === 'holders' && f.maxArb != null) {
       w.arbPct = await fetchWalletHedgePct(w.addr);
@@ -926,7 +926,7 @@ async function rankAndFetchPnl() {
       return;
     }
 
-    // 4. win-metric gates (ROI / win rate / avg win %) — opt-in, extra calls
+    // 4. win-metric gates (ROI / win rate / avg win %) - opt-in, extra calls
     let win = null;
     if (f.winMetricsOn) {
       win = await fetchWalletWinMetrics(w.addr);
@@ -989,15 +989,15 @@ function renderEvent() {
   if (ev.isCategory) {
     const vol = ev.volume24h ? `$${Math.round(ev.volume24h).toLocaleString()} ${ev.isBtc ? '' : '24h '}volume · ` : '';
     els.eventMeta.textContent = `${vol}${ev.eventCount} ${ev.isBtc ? 'markets scanned' : 'events'}${ev.isBtc ? '' : ` · ${state.markets.length} markets`}`;
-    els.marketsSummary.textContent = `Events scanned (${ev.eventCount}) — untick to exclude`;
+    els.marketsSummary.textContent = `Events scanned (${ev.eventCount}) - untick to exclude`;
   } else {
     const vol = ev.volume ? `$${Math.round(ev.volume).toLocaleString()} volume · ` : '';
     els.eventMeta.textContent = `${vol}${state.markets.length} market${state.markets.length === 1 ? '' : 's'}`;
-    els.marketsSummary.textContent = `Markets in this event (${state.markets.length}) — untick to exclude`;
+    els.marketsSummary.textContent = `Markets in this event (${state.markets.length}) - untick to exclude`;
   }
 
   els.marketChips.innerHTML = '';
-  if (ev.isBtc) return; // details section hidden — don't build hundreds of chips
+  if (ev.isBtc) return; // details section hidden - don't build hundreds of chips
   if (ev.isCategory) {
     // one chip per event; unticking excludes all of that event's markets
     const groups = new Map(); // evTitle -> [market idx]
@@ -1030,13 +1030,13 @@ function renderEvent() {
 }
 
 function pnlCell(v) {
-  if (v == null) return '<td class="num na">—</td>';
+  if (v == null) return '<td class="num na">-</td>';
   const cls = v >= 0 ? 'pos' : 'neg';
   return `<td class="num ${cls}">${v >= 0 ? '+' : ''}${fmtUsd(v)}</td>`;
 }
 
 function pctCell(v, signed) {
-  if (v == null) return '<td class="num na">—</td>';
+  if (v == null) return '<td class="num na">-</td>';
   const cls = signed ? (v >= 0 ? 'pos' : 'neg') : '';
   const s = Math.abs(v) >= 1000 ? (v / 1000).toFixed(1) + 'K' : v.toFixed(Math.abs(v) < 10 ? 1 : 0);
   return `<td class="num ${cls}">${signed && v > 0 ? '+' : ''}${s}%</td>`;
@@ -1095,15 +1095,15 @@ function renderResults() {
       case 'avgWin': return pctCell(r.avgWin, false);
       case 'plRatio':
         return r.plRatio == null
-          ? '<td class="num na">—</td>'
+          ? '<td class="num na">-</td>'
           : `<td class="num ${r.plRatio < 1 ? 'neg' : ''}">${r.plRatio === Infinity ? '∞' : r.plRatio.toFixed(1) + '×'}</td>`;
-      case 'views': return `<td class="num">${r.views == null ? '—' : fmtCount(r.views)}</td>`;
-      case 'arbPct': return `<td class="num">${r.arbPct == null ? '—' : r.arbPct.toFixed(0) + '%'}</td>`;
+      case 'views': return `<td class="num">${r.views == null ? '-' : fmtCount(r.views)}</td>`;
+      case 'arbPct': return `<td class="num">${r.arbPct == null ? '-' : r.arbPct.toFixed(0) + '%'}</td>`;
       case 'vol': return `<td class="num">${fmtUsd(r.vol)}</td>`;
       case 'trades': return `<td class="num">${r.trades.toLocaleString()}</td>`;
       case 'shares': return `<td class="num">${fmtCount(Math.round(r.shares))}</td>`;
       case 'markets': return `<td class="num">${r.markets}</td>`;
-      default: return '<td class="num">—</td>';
+      default: return '<td class="num">-</td>';
     }
   };
 
@@ -1138,7 +1138,7 @@ function renderResults() {
 /* ---------------- per-trader detail (closed bets) ---------------- */
 
 /** Detail table for one trader: their closed bets, ordered by whatever the
- *  active filters care about — % return by default (longshot view), $ profit
+ *  active filters care about - % return by default (longshot view), $ profit
  *  when only the ROI filter is set. */
 function renderBets(win, addr) {
   const bets = win.bets || [];
@@ -1192,7 +1192,7 @@ function renderBets(win, addr) {
       : ` · gained ${fmtUsd(win.grossGain)} / lost ${fmtUsd(win.grossLoss)} (${win.plRatio === Infinity ? '∞' : win.plRatio.toFixed(1) + '×'})`;
   const scope = win.complete
     ? `<span class="muted">full history · ${win.eventsScanned.toLocaleString()} events</span>`
-    : `<button class="secondary small deep-btn" data-addr="${addr}">Load full history (last ${win.eventsScanned.toLocaleString()} events scanned — slower)</button>`;
+    : `<button class="secondary small deep-btn" data-addr="${addr}">Load full history (last ${win.eventsScanned.toLocaleString()} events scanned - slower)</button>`;
   return `
     <div class="bets-head">
       <span class="muted bets-summary">${nBets.toLocaleString()} closed bets · ${nWins.toLocaleString()} won${gl}</span>
@@ -1227,7 +1227,7 @@ els.resultsBody.addEventListener('click', async (e) => {
       state.winCache.set(addr, win);
       cell.innerHTML = renderBets(win, addr);
     } catch (_) {
-      deepBtn.textContent = 'Failed — try again';
+      deepBtn.textContent = 'Failed - try again';
       deepBtn.disabled = false;
     }
     return;
@@ -1250,7 +1250,7 @@ els.resultsBody.addEventListener('click', async (e) => {
     const win = await fetchWalletWinMetrics(btn.dataset.addr); // cached if already computed
     detail.firstElementChild.innerHTML = renderBets(win, btn.dataset.addr);
   } catch (_) {
-    detail.firstElementChild.innerHTML = '<span class="muted">Failed to load trade history — try again.</span>';
+    detail.firstElementChild.innerHTML = '<span class="muted">Failed to load trade history - try again.</span>';
   }
 });
 
@@ -1287,7 +1287,7 @@ function exportCsv() {
   const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'polyscan-wallets.csv';
+  a.download = 'markyscan-wallets.csv';
   a.click();
   URL.revokeObjectURL(a.href);
 }

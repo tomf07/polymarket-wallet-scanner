@@ -87,13 +87,15 @@ main {
 }
 
 #panel-event > label,
-#panel-category > label {
+#panel-category > label,
+#panel-btc > label {
   display: block;
   font-weight: 600;
   margin-bottom: 8px;
 }
 
-#panel-category select {
+#panel-category select,
+#panel-btc select {
   background: var(--bg-elev);
   border: 1px solid var(--border);
   color: var(--text);
