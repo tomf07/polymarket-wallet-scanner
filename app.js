@@ -637,7 +637,7 @@ async function fetchWalletWinMetrics(addr, deep = false, onProgress = null) {
     if (b.shares < -0.01) continue;
     if (truncated && !(b.oldest && b.oldest.type === 'TRADE' && b.oldest.side === 'BUY')) continue;
     const open = posByMarket.get(market);
-    const exited = b.shares < 0.01; // fully sold/redeemed (hedgers' dead side handled below)
+    const exited = b.shares < 0.01; // fully sold/redeemed (hhedgers' dead side handled below)
     // resolved: a redeem happened, or the wallet no longer lists this market
     // among its open positions (leftover shares expired worthless)
     const resolved = b.redeemed || (!open && !truncated);
@@ -891,7 +891,7 @@ async function rankAndFetchPnl() {
   await pool(candidates, PNL_CONCURRENCY, async (w) => {
     if (accepted >= topN) return; // quota already filled
 
-    // 1. arb/edger gate - trades mode: free (trade stances already counted)
+    // 1. arb/hedger gate - trades mode: free (trade stances already counted)
     if (f.maxArb != null && w.arbPct != null && w.arbPct > f.maxArb) {
       skipped++;
       progress();
@@ -907,7 +907,7 @@ async function rankAndFetchPnl() {
       return;
     }
 
-    // 2b. arb/edger gate - holders mode: check the wallet's own positions
+    // 2b. arb/hedger gate - holders mode: check the wallet's own positions
     // for both-sides holdings in this event (1 call per wallet)
     if (state.mode === 'holders' && f.maxArb != null) {
       w.arbPct = await fetchWalletHedgePct(w.addr);
