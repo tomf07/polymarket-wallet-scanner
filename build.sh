@@ -31,5 +31,15 @@ mkdir dist
 "$ESBUILD" styles.css --minify --outfile=dist/styles.css --log-level=warning
 cp index.html dist/
 
+# content-hashed filenames: every deploy gets fresh asset URLs, so browsers
+# can never pair a new index.html with a stale cached app.js
+JS_HASH=$(openssl dgst -sha256 dist/app.js | awk '{print substr($NF,1,8)}')
+CSS_HASH=$(openssl dgst -sha256 dist/styles.css | awk '{print substr($NF,1,8)}')
+mv dist/app.js "dist/app.$JS_HASH.js"
+mv dist/styles.css "dist/styles.$CSS_HASH.css"
+sed -i.bak "s|src=\"app\.js\"|src=\"app.$JS_HASH.js\"|; s|href=\"styles\.css\"|href=\"styles.$CSS_HASH.css\"|" dist/index.html
+rm -f dist/index.html.bak
+
 echo "dist/ ready:"
-wc -c app.js dist/app.js | sed 's/^ *//'
+ls dist
+wc -c app.js "dist/app.$JS_HASH.js" | sed 's/^ *//'
