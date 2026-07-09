@@ -206,5 +206,14 @@
   </footer>
 
   <script src="app.js"></script>
+  <script>
+    // Vercel Web Analytics — skipped during local development
+    if (!['localhost', '127.0.0.1'].includes(location.hostname)) {
+      const s = document.createElement('script');
+      s.defer = true;
+      s.src = '/_vercel/insights/script.js';
+      document.head.appendChild(s);
+    }
+  </script>
 </body>
 </html>
