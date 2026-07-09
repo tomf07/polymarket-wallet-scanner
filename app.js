@@ -17,7 +17,8 @@ const LB_API = 'https://lb-api.polymarket.com';
 
 const TRADES_PAGE_SIZE = 500;
 const ACTIVITY_PAGE_SIZE = 500;
-const ACTIVITY_MAX_PAGES = 4; // win metrics read up to 2,000 recent activity events
+const ACTIVITY_MAX_PAGES = 4; // bulk scans: up to 2,000 recent activity events per wallet
+const DEEP_ACTIVITY_MAX_PAGES = 60; // on-demand "full history": up to 30,000 events
 const DEAD_POSITION_PCT = -99; // open position down ≥99% = scored as a loss (anti win-rate gaming)
 const MARKET_CONCURRENCY = 5;
 const PNL_CONCURRENCY = 8;
@@ -534,23 +535,47 @@ async function fetchWalletPnl(addr) {
  *  (resolved worthless). Still-open bets are ignored. History is capped at
  *  ACTIVITY_MAX_PAGES pages; with a truncated history, dangling positions are
  *  skipped instead of guessed. */
-async function fetchWalletWinMetrics(addr) {
-  if (state.winCache.has(addr)) return state.winCache.get(addr);
+async function fetchWalletWinMetrics(addr, deep = false, onProgress = null) {
+  const cached = state.winCache.get(addr);
+  // a deep request only reuses the cache if it already covers the full history
+  if (cached && (!deep || cached.complete)) return cached;
 
   const lb = await fetchJson(`${LB_API}/volume?window=all&limit=1&address=${addr}`);
   const volume = Array.isArray(lb) && lb[0] && typeof lb[0].amount === 'number' ? lb[0].amount : null;
 
+  // walk history newest→oldest with an end-timestamp cursor (the offset param
+  // is capped at 3,000 by the API; the cursor has no such limit)
+  const maxPages = deep ? DEEP_ACTIVITY_MAX_PAGES : ACTIVITY_MAX_PAGES;
   const acts = [];
-  for (let p = 0; p < ACTIVITY_MAX_PAGES; p++) {
+  const seenEv = new Set();
+  let cursor = null;
+  let exhausted = false;
+  for (let p = 0; p < maxPages; p++) {
     if (state.cancelled) break;
     const page = await fetchJson(
-      `${DATA}/activity?user=${addr}&limit=${ACTIVITY_PAGE_SIZE}&offset=${p * ACTIVITY_PAGE_SIZE}`
+      `${DATA}/activity?user=${addr}&limit=${ACTIVITY_PAGE_SIZE}` + (cursor != null ? `&end=${cursor}` : '')
     );
-    if (!Array.isArray(page) || page.length === 0) break;
-    acts.push(...page);
-    if (page.length < ACTIVITY_PAGE_SIZE) break;
+    if (!Array.isArray(page) || page.length === 0) {
+      exhausted = true;
+      break;
+    }
+    for (const a of page) {
+      // the cursor is inclusive, so boundary events repeat across pages
+      const k = `${a.type}|${a.transactionHash || ''}|${a.asset || ''}|${a.conditionId}|${a.timestamp}|${a.size}`;
+      if (!seenEv.has(k)) {
+        seenEv.add(k);
+        acts.push(a);
+      }
+    }
+    if (onProgress) onProgress(acts.length);
+    if (page.length < ACTIVITY_PAGE_SIZE) {
+      exhausted = true;
+      break;
+    }
+    const oldest = page[page.length - 1].timestamp;
+    cursor = oldest === cursor ? oldest - 1 : oldest; // same-second flood guard
   }
-  const truncated = acts.length >= ACTIVITY_PAGE_SIZE * ACTIVITY_MAX_PAGES;
+  const truncated = !exhausted;
 
   // markets the wallet currently holds a position in, with enough detail to
   // spot "decided but unclaimed" bets: dead losers held open to dodge the
@@ -648,17 +673,22 @@ async function fetchWalletWinMetrics(addr) {
     });
   }
   bets.sort((x, y) => y.retPct - x.retPct);
+  // cap kept bets but preserve both tails, or big wallets lose their losses
+  const kept = bets.length > 200 ? [...bets.slice(0, 100), ...bets.slice(-100)] : bets;
 
   const metrics = {
     volume,
     closedBets: closed,
+    wonBets: wins,
     winRate: closed >= 3 ? (wins / closed) * 100 : null, // need a minimal sample
     avgWinPct: wins > 0 ? winPctSum / wins : null,
     grossGain,
     grossLoss,
     // gain/loss ratio (profit factor): 1.11 = gives back 90% of gains; ∞ = no losses yet
     plRatio: closed >= 3 ? (grossLoss > 0 ? grossGain / grossLoss : grossGain > 0 ? Infinity : null) : null,
-    bets: bets.slice(0, 200),
+    bets: kept,
+    eventsScanned: acts.length,
+    complete: exhausted, // pagination ended naturally → this IS the full history
   };
   state.winCache.set(addr, metrics);
   return metrics;
@@ -1102,7 +1132,7 @@ function renderResults() {
 /** Detail table for one trader: their closed bets, ordered by whatever the
  *  active filters care about — % return by default (longshot view), $ profit
  *  when only the ROI filter is set. */
-function renderBets(win) {
+function renderBets(win, addr) {
   const bets = win.bets || [];
   if (bets.length === 0) {
     return '<span class="muted">No scoreable closed bets in this wallet\'s recent history (last ~2,000 events; still-open and split/merge markets are excluded).</span>';
@@ -1118,12 +1148,15 @@ function renderBets(win) {
     .sort((x, y) => x.retPct - y.retPct)
     .slice(0, 3);
 
+  const fmtWhen = (ts) =>
+    ts ? new Date(ts * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' }) : '';
   const betRow = (b) => `<tr>
       <td class="bet-title">${
         b.eventSlug
           ? `<a href="https://polymarket.com/event/${esc(b.eventSlug)}" target="_blank" rel="noopener">${esc(b.title)}</a>`
           : esc(b.title)
-      } <span class="badge ${b.status === 'held at ~0' ? 'bad' : b.retPct > 0 && (b.status === 'redeemed' || b.status === 'unclaimed win') ? '' : 'dim'}">${b.status}</span></td>
+      } <span class="badge ${b.status === 'held at ~0' ? 'bad' : b.retPct > 0 && (b.status === 'redeemed' || b.status === 'unclaimed win') ? '' : 'dim'}">${b.status}</span>
+      <span class="bet-when">${fmtWhen(b.ts)}</span></td>
       <td class="num">${fmtUsd(b.cost)}</td>
       <td class="num ${b.profit >= 0 ? 'pos' : 'neg'}">${b.profit >= 0 ? '+' : ''}${fmtUsd(b.profit)}</td>
       <td class="num ${b.retPct >= 0 ? 'pos' : 'neg'}">${b.retPct >= 0 ? '+' : ''}${
@@ -1140,18 +1173,41 @@ function renderBets(win) {
          </table>`
       : '';
 
-  const nWins = bets.filter((b) => b.retPct > 0).length;
+  const nWins = win.wonBets ?? bets.filter((b) => b.retPct > 0).length;
+  const nBets = win.closedBets ?? bets.length;
   const gl =
     win.plRatio == null
       ? ''
       : ` · gained ${fmtUsd(win.grossGain)} / lost ${fmtUsd(win.grossLoss)} (${win.plRatio === Infinity ? '∞' : win.plRatio.toFixed(1) + '×'})`;
+  const scope = win.complete
+    ? `<span class="muted">full history · ${win.eventsScanned.toLocaleString()} events</span>`
+    : `<button class="secondary small deep-btn" data-addr="${addr}">Load full history (last ${win.eventsScanned.toLocaleString()} events scanned — slower)</button>`;
   return `
-    <div class="muted bets-summary">${bets.length} closed bets · ${nWins} won${gl} · sorted by ${byDollar ? '$ profit' : '% return'}</div>
+    <div class="muted bets-summary">${nBets.toLocaleString()} closed bets · ${nWins.toLocaleString()} won${gl} · sorted by ${byDollar ? '$ profit' : '% return'}</div>
     ${section(byDollar ? 'Biggest wins ($)' : 'Biggest wins (%)', wins)}
-    ${section('Worst losses', losses)}`;
+    ${section('Worst losses', losses)}
+    <div class="bets-foot">${scope}</div>`;
 }
 
 els.resultsBody.addEventListener('click', async (e) => {
+  const deepBtn = e.target.closest('.deep-btn');
+  if (deepBtn) {
+    const cell = deepBtn.closest('td');
+    const addr = deepBtn.dataset.addr;
+    deepBtn.disabled = true;
+    deepBtn.textContent = 'Loading full history…';
+    try {
+      const win = await fetchWalletWinMetrics(addr, true, (n) => {
+        deepBtn.textContent = `Loading full history… ${n.toLocaleString()} events`;
+      });
+      state.winCache.set(addr, win);
+      cell.innerHTML = renderBets(win, addr);
+    } catch (_) {
+      deepBtn.textContent = 'Failed — try again';
+      deepBtn.disabled = false;
+    }
+    return;
+  }
   const btn = e.target.closest('.expand-btn');
   if (!btn) return;
   const tr = btn.closest('tr');
@@ -1168,7 +1224,7 @@ els.resultsBody.addEventListener('click', async (e) => {
   tr.after(detail);
   try {
     const win = await fetchWalletWinMetrics(btn.dataset.addr); // cached if already computed
-    detail.firstElementChild.innerHTML = renderBets(win);
+    detail.firstElementChild.innerHTML = renderBets(win, btn.dataset.addr);
   } catch (_) {
     detail.firstElementChild.innerHTML = '<span class="muted">Failed to load trade history — try again.</span>';
   }
