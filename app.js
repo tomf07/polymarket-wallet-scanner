@@ -66,6 +66,7 @@ const els = {
   panelEvent: $('#panel-event'),
   panelCategory: $('#panel-category'),
   panelBtc: $('#panel-btc'),
+  panelGamble: $('#panel-gamble'),
   categorySelect: $('#category-select'),
   catEventsN: $('#cat-events'),
   btcTf: $('#btc-tf'),
@@ -378,6 +379,30 @@ async function loadBtcEvent() {
     isCategory: true, // reuse category-style meta/chips rendering
     isBtc: true,
     eventCount: events.length,
+  };
+}
+
+/** Gambling mode: roll a random topic, then a random active event in it, then
+ *  one random market from that event. Filters apply like any other scan. */
+async function loadGambleEvent() {
+  const tags = Object.keys(CATEGORY_LABELS);
+  const tag = tags[Math.floor(Math.random() * tags.length)];
+  const evs = await fetchJson(
+    `${GAMMA}/events?tag_slug=${encodeURIComponent(tag)}&closed=false&order=volume24hr&ascending=false&limit=100`
+  );
+  if (!Array.isArray(evs)) return null;
+  const pool = evs.filter((e) => Array.isArray(e.markets) && e.markets.some((m) => m.conditionId));
+  if (pool.length === 0) return null;
+  const ev = pool[Math.floor(Math.random() * pool.length)];
+  const ms = ev.markets.filter((m) => m.conditionId);
+  const market = ms[Math.floor(Math.random() * ms.length)];
+  return {
+    title: ev.title || 'Event',
+    icon: ev.icon || ev.image,
+    volume: ev.volume,
+    scanEventIds: [ev.id].filter(Boolean),
+    markets: [market],
+    gambleTag: CATEGORY_LABELS[tag] || tag,
   };
 }
 
@@ -738,21 +763,30 @@ async function runScan() {
   els.rerankBtn.classList.add('hidden');
 
   try {
-    // 1. resolve scan target: one event, a category's top events, or a BTC time-frame series
+    // 1. resolve scan target: one event, a category's top events, a BTC
+    // time-frame series, or a random gamble pick
     const isCat = state.scanMode === 'category';
     const isBtc = state.scanMode === 'btc';
+    const isGamble = state.scanMode === 'gamble';
     setStatus(
-      isBtc ? 'Resolving BTC up/down markets…' : isCat ? 'Loading the category’s top events…' : 'Resolving event…',
+      isGamble ? 'Rolling the dice…'
+        : isBtc ? 'Resolving BTC up/down markets…'
+          : isCat ? 'Loading the category’s top events…'
+            : 'Resolving event…',
       2
     );
-    const event = isBtc ? await loadBtcEvent() : isCat ? await loadCategoryEvent() : await loadEvent(parsed);
+    const event = isGamble
+      ? await loadGambleEvent()
+      : isBtc ? await loadBtcEvent() : isCat ? await loadCategoryEvent() : await loadEvent(parsed);
     if (!event) {
       throw new Error(
-        isBtc
-          ? 'No BTC up/down markets found for this time-frame and lookback.'
-          : isCat
-            ? 'No open events found for this category right now.'
-            : 'Event or market not found. Check the link and try again.'
+        isGamble
+          ? 'Bad roll - could not find a random market. Spin again.'
+          : isBtc
+            ? 'No BTC up/down markets found for this time-frame and lookback.'
+            : isCat
+              ? 'No open events found for this category right now.'
+              : 'Event or market not found. Check the link and try again.'
       );
     }
 
@@ -1009,8 +1043,9 @@ function renderEvent() {
     els.eventMeta.textContent = `${vol}${ev.eventCount} ${ev.isBtc ? 'markets scanned' : 'events'}${ev.isBtc ? '' : ` · ${state.markets.length} markets`}`;
     els.marketsSummary.textContent = `Events scanned (${ev.eventCount}) - untick to exclude`;
   } else {
+    const roll = ev.gambleTag ? `Random ${ev.gambleTag} roll · ` : '';
     const vol = ev.volume ? `$${Math.round(ev.volume).toLocaleString()} volume · ` : '';
-    els.eventMeta.textContent = `${vol}${state.markets.length} market${state.markets.length === 1 ? '' : 's'}`;
+    els.eventMeta.textContent = `${roll}${vol}${state.markets.length} market${state.markets.length === 1 ? '' : 's'}`;
     els.marketsSummary.textContent = `Markets in this event (${state.markets.length}) - untick to exclude`;
   }
 
@@ -1342,6 +1377,7 @@ els.mainTabs.addEventListener('click', (e) => {
   els.panelEvent.classList.toggle('hidden', state.scanMode !== 'event');
   els.panelCategory.classList.toggle('hidden', state.scanMode !== 'category');
   els.panelBtc.classList.toggle('hidden', state.scanMode !== 'btc');
+  els.panelGamble.classList.toggle('hidden', state.scanMode !== 'gamble');
   updateDepthAvailability();
 });
 

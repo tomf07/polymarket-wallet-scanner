@@ -20,6 +20,7 @@
         <button class="main-tab active" data-mode="event">Event scan</button>
         <button class="main-tab" data-mode="category">Best of category</button>
         <button class="main-tab" data-mode="btc">BTC up/down</button>
+        <button class="main-tab" data-mode="gamble">Wallet gambling</button>
       </div>
 
       <div id="panel-event">
@@ -75,6 +76,11 @@
         </div>
       </div>
 
+      <div id="panel-gamble" class="hidden">
+        <label>Wallet gambling - one random market from a random topic</label>
+        <div class="gamble-hint">Feeling lucky? Hit Scan to roll. Your filters below still apply, so the dice only land on wallets that pass them.</div>
+      </div>
+
       <div class="input-row action-row">
         <button id="scan-btn" class="primary">Scan</button>
         <button id="cancel-btn" class="danger hidden">Cancel</button>
@@ -105,6 +111,10 @@
             <option value="holders">Top holders (rank by position size)</option>
           </select>
         </div>
+        <div class="option">
+          <label for="ex-red-all">Losing wallets</label>
+          <label class="check option-check"><input type="checkbox" id="ex-red-all" /> Exclude red all-time PnL</label>
+        </div>
       </div>
 
       <details class="filters" id="filters">
@@ -114,7 +124,6 @@
           <span class="filter-title">Exclude red (negative) PnL</span>
           <label class="check"><input type="checkbox" id="ex-red-d7" /> 7D</label>
           <label class="check"><input type="checkbox" id="ex-red-d30" /> 30D</label>
-          <label class="check"><input type="checkbox" id="ex-red-all" /> All time</label>
         </div>
 
         <div class="filter-group">

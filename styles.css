@@ -106,6 +106,9 @@ main {
 
 .action-row { margin-top: 12px; }
 
+.gamble-hint { color: var(--text-dim); font-size: 0.88rem; line-height: 1.5; }
+.option-check { margin-top: 9px; }
+
 .input-row { display: flex; gap: 10px; }
 
 #url-input {
