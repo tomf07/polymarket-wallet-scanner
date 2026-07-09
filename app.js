@@ -67,6 +67,7 @@ const els = {
   panelCategory: $('#panel-category'),
   panelBtc: $('#panel-btc'),
   panelGamble: $('#panel-gamble'),
+  degenBtn: $('#degen-btn'),
   categorySelect: $('#category-select'),
   catEventsN: $('#cat-events'),
   btcTf: $('#btc-tf'),
@@ -130,6 +131,7 @@ const state = {
   mode: 'trades', // 'trades' | 'holders' - how wallets were discovered/ranked
   scanMode: 'event', // 'event' | 'category' - which main tab drives the scan
   betsSortMode: null, // null = auto from filters; 'pct' | 'usd' once the user picks
+  degenRoll: false, // gamble tab: next roll digs outside the top 100 by volume
 };
 
 /* ---------------- fetch helpers ---------------- */
@@ -383,27 +385,36 @@ async function loadBtcEvent() {
 }
 
 /** Gambling mode: roll a random topic, then a random active event in it, then
- *  one random market from that event. Filters apply like any other scan. */
+ *  one random market from that event. Filters apply like any other scan.
+ *  Degen rolls skip a topic's top 100 by volume and dig in the graveyard
+ *  below - retrying a few topics since small ones may not go that deep. */
 async function loadGambleEvent() {
+  const degen = state.degenRoll;
   const tags = Object.keys(CATEGORY_LABELS);
-  const tag = tags[Math.floor(Math.random() * tags.length)];
-  const evs = await fetchJson(
-    `${GAMMA}/events?tag_slug=${encodeURIComponent(tag)}&closed=false&order=volume24hr&ascending=false&limit=100`
-  );
-  if (!Array.isArray(evs)) return null;
-  const pool = evs.filter((e) => Array.isArray(e.markets) && e.markets.some((m) => m.conditionId));
-  if (pool.length === 0) return null;
-  const ev = pool[Math.floor(Math.random() * pool.length)];
-  const ms = ev.markets.filter((m) => m.conditionId);
-  const market = ms[Math.floor(Math.random() * ms.length)];
-  return {
-    title: ev.title || 'Event',
-    icon: ev.icon || ev.image,
-    volume: ev.volume,
-    scanEventIds: [ev.id].filter(Boolean),
-    markets: [market],
-    gambleTag: CATEGORY_LABELS[tag] || tag,
-  };
+  const attempts = degen ? 4 : 1;
+  for (let i = 0; i < attempts; i++) {
+    const tag = tags[Math.floor(Math.random() * tags.length)];
+    const offset = degen ? 100 + Math.floor(Math.random() * 7) * 50 : 0; // 100..400
+    const evs = await fetchJson(
+      `${GAMMA}/events?tag_slug=${encodeURIComponent(tag)}&closed=false&order=volume24hr&ascending=false&limit=${degen ? 50 : 100}&offset=${offset}`
+    );
+    if (!Array.isArray(evs)) continue;
+    const pool = evs.filter((e) => Array.isArray(e.markets) && e.markets.some((m) => m.conditionId));
+    if (pool.length === 0) continue;
+    const ev = pool[Math.floor(Math.random() * pool.length)];
+    const ms = ev.markets.filter((m) => m.conditionId);
+    const market = ms[Math.floor(Math.random() * ms.length)];
+    return {
+      title: ev.title || 'Event',
+      icon: ev.icon || ev.image,
+      volume: ev.volume,
+      scanEventIds: [ev.id].filter(Boolean),
+      markets: [market],
+      gambleTag: CATEGORY_LABELS[tag] || tag,
+      degen,
+    };
+  }
+  return null;
 }
 
 /** Collect wallets active in one market.
@@ -899,7 +910,7 @@ function pnlPasses(pnl, f) {
 
 async function rankAndFetchPnl() {
   const agg = aggregateWallets();
-  const topN = Math.min(1000, Math.max(5, parseInt(els.topN.value, 10) || 100));
+  const topN = Math.min(100, Math.max(5, parseInt(els.topN.value, 10) || 100));
   const f = readFilters();
   const pnlFilterOn =
     f.exRed.d7 || f.exRed.d30 || f.exRed.all ||
@@ -1043,7 +1054,7 @@ function renderEvent() {
     els.eventMeta.textContent = `${vol}${ev.eventCount} ${ev.isBtc ? 'markets scanned' : 'events'}${ev.isBtc ? '' : ` · ${state.markets.length} markets`}`;
     els.marketsSummary.textContent = `Events scanned (${ev.eventCount}) - untick to exclude`;
   } else {
-    const roll = ev.gambleTag ? `Random ${ev.gambleTag} roll · ` : '';
+    const roll = ev.gambleTag ? `${ev.degen ? 'DEGEN' : 'Random'} ${ev.gambleTag} roll · ` : '';
     const vol = ev.volume ? `$${Math.round(ev.volume).toLocaleString()} volume · ` : '';
     els.eventMeta.textContent = `${roll}${vol}${state.markets.length} market${state.markets.length === 1 ? '' : 's'}`;
     els.marketsSummary.textContent = `Markets in this event (${state.markets.length}) - untick to exclude`;
@@ -1383,9 +1394,20 @@ els.mainTabs.addEventListener('click', (e) => {
 
 els.btcTf.addEventListener('change', updateDepthAvailability);
 
-els.scanBtn.addEventListener('click', runScan);
+els.scanBtn.addEventListener('click', () => {
+  state.degenRoll = false;
+  runScan();
+});
+els.degenBtn.addEventListener('click', () => {
+  if (state.running) return;
+  state.degenRoll = true;
+  runScan();
+});
 els.input.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !state.running) runScan();
+  if (e.key === 'Enter' && !state.running) {
+    state.degenRoll = false;
+    runScan();
+  }
 });
 els.cancelBtn.addEventListener('click', () => {
   state.cancelled = true;
