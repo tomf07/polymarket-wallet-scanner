@@ -160,6 +160,68 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .option input[type="number"] { width: 110px; }
 .option input[type="number"]:focus { outline: none; border-color: var(--accent); }
 
+/* ---------- info tooltips ---------- */
+.info {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  border: 1px solid var(--text-dim);
+  color: var(--text-dim);
+  font-size: 0.62rem;
+  font-family: Georgia, serif;
+  font-style: italic;
+  font-weight: 700;
+  line-height: 1;
+  margin-left: 5px;
+  cursor: help;
+  position: relative;
+  vertical-align: middle;
+  flex-shrink: 0;
+  user-select: none;
+}
+.info:hover,
+.info:focus {
+  color: var(--accent);
+  border-color: var(--accent);
+  outline: none;
+}
+.info::after {
+  content: attr(data-tip);
+  position: absolute;
+  bottom: calc(100% + 9px);
+  left: -10px;
+  width: 280px;
+  max-width: 74vw;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  color: var(--text);
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 0.78rem;
+  font-style: normal;
+  font-weight: 400;
+  line-height: 1.5;
+  text-align: left;
+  text-transform: none;
+  letter-spacing: normal;
+  white-space: normal;
+  padding: 10px 12px;
+  border-radius: 8px;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.12s ease;
+  pointer-events: none;
+  z-index: 60;
+}
+.info:hover::after,
+.info:focus::after {
+  opacity: 1;
+  visibility: visible;
+}
+
 /* ---------- advanced filters ---------- */
 .filters { margin-top: 14px; }
 .filters summary {
