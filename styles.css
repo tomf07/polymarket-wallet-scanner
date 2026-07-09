@@ -25,6 +25,7 @@ body {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
+  overflow-x: hidden;
 }
 
 header {
@@ -585,6 +586,52 @@ footer {
 footer p { max-width: 760px; margin: 0 auto; line-height: 1.5; }
 
 @media (max-width: 640px) {
-  .input-row { flex-direction: column; }
-  .primary, .danger { width: 100%; }
+  header { padding: 24px 16px 6px; }
+  .logo { font-size: 1.65rem; }
+  .tagline { font-size: 0.88rem; }
+  main { padding: 12px 12px 32px; }
+  .card { padding: 14px; }
+
+  .main-tabs {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+  .main-tab {
+    flex: 1 1 45%;
+    padding: 9px 6px;
+    font-size: 0.82rem;
+  }
+
+  .input-row { flex-direction: column; align-items: stretch; }
+  .primary, .danger, #degen-btn { width: 100%; }
+
+  .option { width: 100%; }
+  .option select,
+  .option input[type="number"] { width: 100%; }
+
+  .filter-title { min-width: 0; width: 100%; }
+  .inline-label input.pct { width: 84px; }
+
+  /* 16px inputs stop iOS from zooming the whole page on focus */
+  #url-input,
+  .option select,
+  .option input[type="number"],
+  #panel-category select,
+  #panel-btc select,
+  .bounds-grid input,
+  .inline-label input {
+    font-size: 16px;
+  }
+
+  /* tooltips become a fixed banner at the top of the screen - they can
+     never overflow the viewport no matter where the icon sits */
+  .info::after {
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    right: 12px;
+    bottom: auto;
+    width: auto;
+    max-width: none;
+  }
 }
