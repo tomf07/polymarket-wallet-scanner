@@ -1310,6 +1310,15 @@ function exportCsv() {
 
 /* ---------------- events ---------------- */
 
+// Max depth is pointless on 5-minute BTC markets: they rarely exceed the
+// normal trade window, and the extra holders lookups just slow the scan
+function updateDepthAvailability() {
+  const hybridOpt = els.depth.querySelector('option[value="hybrid"]');
+  const disable = state.scanMode === 'btc' && els.btcTf.value === '5m';
+  hybridOpt.disabled = disable;
+  if (disable && els.depth.value === 'hybrid') els.depth.value = '2';
+}
+
 els.mainTabs.addEventListener('click', (e) => {
   const btn = e.target.closest('.main-tab');
   if (!btn || state.running || btn.dataset.mode === state.scanMode) return;
@@ -1318,7 +1327,10 @@ els.mainTabs.addEventListener('click', (e) => {
   els.panelEvent.classList.toggle('hidden', state.scanMode !== 'event');
   els.panelCategory.classList.toggle('hidden', state.scanMode !== 'category');
   els.panelBtc.classList.toggle('hidden', state.scanMode !== 'btc');
+  updateDepthAvailability();
 });
+
+els.btcTf.addEventListener('change', updateDepthAvailability);
 
 els.scanBtn.addEventListener('click', runScan);
 els.input.addEventListener('keydown', (e) => {
