@@ -530,20 +530,32 @@ async function fetchWalletPnl(addr) {
  *  (resolved worthless). Still-open bets are ignored. History is capped at
  *  ACTIVITY_MAX_PAGES pages; with a truncated history, dangling positions are
  *  skipped instead of guessed. */
+const evKey = (a) =>
+  `${a.type}|${a.transactionHash || ''}|${a.asset || ''}|${a.conditionId}|${a.timestamp}|${a.size}`;
+
 async function fetchWalletWinMetrics(addr, deep = false, onProgress = null) {
   const cached = state.winCache.get(addr);
   // a deep request only reuses the cache if it already covers the full history
   if (cached && (!deep || cached.complete)) return cached;
 
-  const lb = await fetchJson(`${LB_API}/volume?window=all&limit=1&address=${addr}`);
-  const volume = Array.isArray(lb) && lb[0] && typeof lb[0].amount === 'number' ? lb[0].amount : null;
+  // deep loads keep their fetched history, so the next deep call resumes where
+  // the previous one stopped instead of starting over
+  const resume = deep && cached && cached.acts ? cached : null;
+
+  let volume = null;
+  if (resume) {
+    volume = resume.volume;
+  } else {
+    const lb = await fetchJson(`${LB_API}/volume?window=all&limit=1&address=${addr}`);
+    volume = Array.isArray(lb) && lb[0] && typeof lb[0].amount === 'number' ? lb[0].amount : null;
+  }
 
   // walk history newest→oldest with an end-timestamp cursor (the offset param
   // is capped at 3,000 by the API; the cursor has no such limit)
   const maxPages = deep ? DEEP_ACTIVITY_MAX_PAGES : ACTIVITY_MAX_PAGES;
-  const acts = [];
-  const seenEv = new Set();
-  let cursor = null;
+  const acts = resume ? [...resume.acts] : [];
+  const seenEv = new Set(acts.map(evKey));
+  let cursor = resume ? resume.oldestCursor : null;
   let exhausted = false;
   for (let p = 0; p < maxPages; p++) {
     if (state.cancelled) break;
@@ -556,11 +568,14 @@ async function fetchWalletWinMetrics(addr, deep = false, onProgress = null) {
     }
     for (const a of page) {
       // the cursor is inclusive, so boundary events repeat across pages
-      const k = `${a.type}|${a.transactionHash || ''}|${a.asset || ''}|${a.conditionId}|${a.timestamp}|${a.size}`;
-      if (!seenEv.has(k)) {
-        seenEv.add(k);
-        acts.push(a);
-      }
+      const k = evKey(a);
+      if (seenEv.has(k)) continue;
+      seenEv.add(k);
+      acts.push({
+        type: a.type, side: a.side, size: a.size, usdcSize: a.usdcSize,
+        conditionId: a.conditionId, timestamp: a.timestamp, title: a.title,
+        eventSlug: a.eventSlug, transactionHash: a.transactionHash, asset: a.asset,
+      });
     }
     if (onProgress) onProgress(acts.length);
     if (page.length < ACTIVITY_PAGE_SIZE) {
@@ -691,6 +706,9 @@ async function fetchWalletWinMetrics(addr, deep = false, onProgress = null) {
     bets: kept,
     eventsScanned: acts.length,
     complete: exhausted, // pagination ended naturally → this IS the full history
+    deepRan: deep, // a deep load happened; if still incomplete, offer "load more"
+    oldestCursor: cursor, // resume point for the next deep call
+    acts: deep ? acts : undefined, // kept only for deep loads (memory) to allow resuming
   };
   state.winCache.set(addr, metrics);
   return metrics;
@@ -1201,7 +1219,11 @@ function renderBets(win, addr) {
       : ` · gained ${fmtUsd(win.grossGain)} / lost ${fmtUsd(win.grossLoss)} (${win.plRatio === Infinity ? '∞' : win.plRatio.toFixed(1) + '×'})`;
   const scope = win.complete
     ? `<span class="muted">full history · ${win.eventsScanned.toLocaleString()} events</span>`
-    : `<button class="secondary small deep-btn" data-addr="${addr}">Load full history (last ${win.eventsScanned.toLocaleString()} events scanned - slower)</button>`;
+    : `<button class="secondary small deep-btn" data-addr="${addr}">${
+        win.deepRan
+          ? `Load 30,000 more (${win.eventsScanned.toLocaleString()} so far)`
+          : `Load full history (last ${win.eventsScanned.toLocaleString()} events scanned - slower)`
+      }</button>`;
   return `
     <div class="bets-head">
       <span class="muted bets-summary">${nBets.toLocaleString()} closed bets · ${nWins.toLocaleString()} won${gl}</span>
