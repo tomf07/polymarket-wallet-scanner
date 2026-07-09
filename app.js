@@ -150,14 +150,7 @@ async function fetchJson(url, tries = 3) {
       return await resp.json();
     } catch (e) {
       if (e.message === 'cancelled') throw e;
-      if (i === tries - 1) {
-        // last resort: public CORS proxy (in case a network/CORS hiccup)
-        try {
-          const resp = await fetch('https://corsproxy.io/?url=' + encodeURIComponent(url));
-          if (resp.ok) return await resp.json();
-        } catch (_) { /* ignore */ }
-        return null;
-      }
+      if (i === tries - 1) return null;
       await sleep(500 * (i + 1));
     }
   }
