@@ -1398,6 +1398,17 @@ function updateDepthAvailability() {
   if (disable && els.depth.value === 'hybrid') els.depth.value = '2';
 }
 
+// info icons sit inside <label>s - without this, tapping one activates the
+// label and focuses its input (mobile keyboard pops up) instead of the tooltip
+document.querySelectorAll('.info').forEach((el) => {
+  el.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (document.activeElement === el) el.blur(); // second tap closes
+    else el.focus();
+  });
+});
+
 els.mainTabs.addEventListener('click', (e) => {
   const btn = e.target.closest('.main-tab');
   if (!btn || state.running || btn.dataset.mode === state.scanMode) return;
