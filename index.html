@@ -69,7 +69,7 @@
             <option value="1d">Daily markets</option>
           </select>
           <label class="inline-label">Lookback
-            <span class="info" tabindex="0" data-tip="How far back to enumerate markets. For 5-minute markets, 24 hours = 288 markets (the scan is capped at 300, so about 25h is the max for 5m). Longer lookbacks suit the hourly, 4-hour and daily time-frames.">i</span>
+            <span class="info" tabindex="0" data-tip="How many hours back to include markets from.">i</span>
             <input type="number" id="btc-hours" min="1" max="720" value="24" class="pct" />
             hours</label>
         </div>
@@ -83,19 +83,19 @@
       <div class="options-row">
         <div class="option">
           <label for="top-n">Max profiles to check (PnL lookups)
-            <span class="info" tabindex="0" data-tip="Discovery finds every wallet in the scanned markets, but only the top N by traded volume get the expensive per-wallet analysis (PnL lookups, win metrics). With filters on, rejected wallets do not count toward N - the scanner keeps walking down the ranking until it has kept N. Bigger N = deeper results, slower scan.">i</span>
+            <span class="info" tabindex="0" data-tip="How many wallets get fully analyzed. Higher = more results, slower scan.">i</span>
           </label>
           <input id="top-n" type="number" min="5" max="1000" step="5" value="100" />
         </div>
         <div class="option">
           <label for="max-views">Max profile views (hide famous wallets)
-            <span class="info" tabindex="0" data-tip="Views on the wallet's Polymarket profile page. Famous, heavily-copied wallets have thousands of views. Set a cap (e.g. 500) to surface under-the-radar traders nobody is watching yet. Blank = no limit.">i</span>
+            <span class="info" tabindex="0" data-tip="Hides famous wallets. Lower = only under-the-radar traders. Blank = no limit.">i</span>
           </label>
           <input id="max-views" type="number" min="0" step="100" placeholder="No limit" />
         </div>
         <div class="option">
           <label for="depth">Trade scan depth
-            <span class="info" tabindex="0" data-tip="How much recent trade history to read per market when discovering wallets. Deeper finds older and smaller traders in busy markets, but scans slower. Top holders mode ranks by current position size instead of traded volume.">i</span>
+            <span class="info" tabindex="0" data-tip="How thoroughly each market is searched for traders. Deeper = more wallets, slower scan.">i</span>
           </label>
           <select id="depth">
             <option value="1">Fast (500 trades/market)</option>
@@ -134,7 +134,7 @@
 
         <div class="filter-group">
           <span class="filter-title">Wallet type (win metrics)
-            <span class="info" tabindex="0" data-tip="Reconstructs each wallet's recent bet history (buys vs sells + redeems, market by market) to compute ROI, win rate, avg win % and gain/loss ratio. Adds sortable columns and the thresholds below. Costs a few extra API calls per wallet, so scans run slower.">i</span>
+            <span class="info" tabindex="0" data-tip="Adds ROI, win rate, avg win % and gain/loss columns for each wallet. Makes scans slower.">i</span>
           </span>
           <label class="check"><input type="checkbox" id="win-metrics" /> Compute (slower - extra lookups per wallet)</label>
           <select id="wallet-type">
@@ -144,22 +144,22 @@
             <option value="roi">High ROI - ROI ≥ 30%</option>
           </select>
           <label class="inline-label">min ROI
-            <span class="info" tabindex="0" data-tip="All-time profit divided by lifetime traded volume, in %. Separates efficient traders from big-volume grinders: +$78K profit sounds great, but on $11M traded it is only 0.7% ROI. Try 10-30 for genuinely sharp wallets.">i</span>
+            <span class="info" tabindex="0" data-tip="Profit relative to total amount traded. Higher = more efficient trader.">i</span>
             <input type="number" id="min-roi" class="pct" placeholder="-" />%</label>
           <label class="inline-label">min win rate
-            <span class="info" tabindex="0" data-tip="Share of decided bets that ended profitable. Dead positions held at ~0 and never claimed count as losses, so wallets cannot inflate this by refusing to sell their losers.">i</span>
+            <span class="info" tabindex="0" data-tip="% of finished bets the wallet won. Cannot be gamed by holding losers forever.">i</span>
             <input type="number" id="min-winrate" min="0" max="100" class="pct" placeholder="-" />%</label>
           <label class="inline-label">min avg win
-            <span class="info" tabindex="0" data-tip="Average % return on the winning bets only. 500%+ means longshot hunters: wallets that buy cheap unlikely outcomes and hit them. Low values mean favorites grinders.">i</span>
+            <span class="info" tabindex="0" data-tip="Average % gain on winning bets. 500%+ = longshot hunters.">i</span>
             <input type="number" id="min-avgwin" min="0" class="pct" placeholder="-" />%</label>
           <label class="inline-label">min gain/loss
-            <span class="info" tabindex="0" data-tip="Gross gains divided by gross losses (profit factor). 1.11 means the wallet gives back 90% of what it gains - profitable but risky. 2 means it keeps twice what it loses back. Below 1 = net loser.">i</span>
+            <span class="info" tabindex="0" data-tip="Wins vs what gets given back. 2 = keeps twice what it loses. Below 1 = net loser.">i</span>
             <input type="number" id="min-plratio" min="0" step="0.1" class="pct" placeholder="-" />×</label>
         </div>
 
         <div class="filter-group">
           <span class="filter-title">Exclude arbers / edgers
-            <span class="info" tabindex="0" data-tip="Detects hedged activity: trading or holding BOTH sides of the same market (Over and Under, Up and Down). A high % means a market-maker or arb bot, not a directional trader - their PnL comes from spread, not picks. Essential on the BTC up/down tab.">i</span>
+            <span class="info" tabindex="0" data-tip="Filters out bots that bet both sides of the same market. Recommended on the BTC tab.">i</span>
           </span>
           <label class="inline-label">
             Max
