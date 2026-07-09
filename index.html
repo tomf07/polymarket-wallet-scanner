@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PolyScan — Polymarket Wallet Profitability Scanner</title>
+  <link rel="stylesheet" href="styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔎</text></svg>" />
+</head>
+<body>
+  <header>
+    <div class="logo">Poly<span>Scan</span></div>
+    <div class="tagline">Find the most profitable wallets in any Polymarket event or category</div>
+  </header>
+
+  <main>
+    <!-- INPUT -->
+    <section class="card" id="input-card">
+      <div class="main-tabs" id="main-tabs">
+        <button class="main-tab active" data-mode="event">Event scan</button>
+        <button class="main-tab" data-mode="category">Best of category</button>
+        <button class="main-tab" data-mode="btc">BTC up/down</button>
+      </div>
+
+      <div id="panel-event">
+        <label for="url-input">Polymarket event or market link</label>
+        <div class="input-row">
+          <input
+            id="url-input"
+            type="text"
+            placeholder="https://polymarket.com/event/world-cup-winner  (or just the slug)"
+            spellcheck="false"
+            autocomplete="off"
+          />
+        </div>
+      </div>
+
+      <div id="panel-category" class="hidden">
+        <label for="category-select">Market category — scans the top open events by 24h volume</label>
+        <div class="input-row">
+          <select id="category-select">
+            <option value="sports">Sports</option>
+            <option value="politics">Politics</option>
+            <option value="crypto">Crypto</option>
+            <option value="esports">Esports</option>
+            <option value="pop-culture">Pop culture</option>
+            <option value="business">Business</option>
+            <option value="economy">Economy</option>
+            <option value="tech">Tech</option>
+            <option value="science">Science</option>
+            <option value="world">World</option>
+            <option value="elections">Elections</option>
+            <option value="geopolitics">Geopolitics</option>
+          </select>
+          <label class="inline-label">Top
+            <input type="number" id="cat-events" min="1" max="30" value="10" class="pct" />
+            events</label>
+        </div>
+      </div>
+
+      <div id="panel-btc" class="hidden">
+        <label for="btc-tf">Bitcoin Up/Down time-frame — scans every market in the lookback window</label>
+        <div class="input-row">
+          <select id="btc-tf">
+            <option value="5m" selected>5-minute markets</option>
+            <option value="15m">15-minute markets</option>
+            <option value="1h">Hourly markets</option>
+            <option value="4h">4-hour markets</option>
+            <option value="1d">Daily markets</option>
+          </select>
+          <label class="inline-label">Lookback
+            <input type="number" id="btc-hours" min="1" max="720" value="24" class="pct" />
+            hours</label>
+        </div>
+      </div>
+
+      <div class="input-row action-row">
+        <button id="scan-btn" class="primary">Scan</button>
+        <button id="cancel-btn" class="danger hidden">Cancel</button>
+      </div>
+
+      <div class="options-row">
+        <div class="option">
+          <label for="top-n">Max profiles to check (PnL lookups)</label>
+          <input id="top-n" type="number" min="5" max="1000" step="5" value="100" />
+        </div>
+        <div class="option">
+          <label for="max-views">Max profile views (hide famous wallets)</label>
+          <input id="max-views" type="number" min="0" step="100" placeholder="No limit" />
+        </div>
+        <div class="option">
+          <label for="depth">Trade scan depth</label>
+          <select id="depth">
+            <option value="1">Fast (500 trades/market)</option>
+            <option value="2" selected>Normal (1,000 trades/market)</option>
+            <option value="4">Deep (2,000 trades/market)</option>
+            <option value="8">Max (4,000 trades/market)</option>
+            <option value="holders">Top holders (rank by position size)</option>
+          </select>
+        </div>
+      </div>
+
+      <details class="filters" id="filters">
+        <summary>Advanced filters</summary>
+
+        <div class="filter-group">
+          <span class="filter-title">Exclude red (negative) PnL</span>
+          <label class="check"><input type="checkbox" id="ex-red-d7" /> 7D</label>
+          <label class="check"><input type="checkbox" id="ex-red-d30" /> 30D</label>
+          <label class="check"><input type="checkbox" id="ex-red-all" /> All time</label>
+        </div>
+
+        <div class="filter-group">
+          <span class="filter-title">PnL bounds ($, blank = no bound)</span>
+          <div class="bounds-grid">
+            <span>7D</span>
+            <input type="number" id="min-d7" placeholder="min" />
+            <input type="number" id="max-d7" placeholder="max" />
+            <span>30D</span>
+            <input type="number" id="min-d30" placeholder="min" />
+            <input type="number" id="max-d30" placeholder="max" />
+            <span>All</span>
+            <input type="number" id="min-all" placeholder="min" />
+            <input type="number" id="max-all" placeholder="max" />
+          </div>
+        </div>
+
+        <div class="filter-group">
+          <span class="filter-title">Wallet type (win metrics)</span>
+          <label class="check"><input type="checkbox" id="win-metrics" /> Compute (slower — extra lookups per wallet)</label>
+          <select id="wallet-type">
+            <option value="">Preset…</option>
+            <option value="longshot">🎯 Longshot hunters — avg win ≥ 500%</option>
+            <option value="grinder">📈 Steady grinders — win rate ≥ 70%</option>
+            <option value="roi">💰 High ROI — ROI ≥ 30%</option>
+          </select>
+          <label class="inline-label">min ROI <input type="number" id="min-roi" class="pct" placeholder="—" />%</label>
+          <label class="inline-label">min win rate <input type="number" id="min-winrate" min="0" max="100" class="pct" placeholder="—" />%</label>
+          <label class="inline-label">min avg win <input type="number" id="min-avgwin" min="0" class="pct" placeholder="—" />%</label>
+          <label class="inline-label" title="Gross gains ÷ gross losses across decided bets. 1.11 = gives back 90% of what it gains; 2 = keeps twice what it loses back.">min gain/loss <input type="number" id="min-plratio" min="0" step="0.1" class="pct" placeholder="—" />×</label>
+        </div>
+
+        <div class="filter-group">
+          <span class="filter-title">Exclude arbers / edgers</span>
+          <label class="inline-label">
+            Max
+            <input type="number" id="max-arb" min="0" max="100" placeholder="—" class="pct" />
+            % of trades on opposite sides of the same market (Over↔Under, Up↔Down…)
+          </label>
+        </div>
+      </details>
+
+      <div id="status" class="status hidden">
+        <div class="status-text" id="status-text">…</div>
+        <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+      </div>
+      <div id="error" class="error hidden"></div>
+    </section>
+
+    <!-- EVENT INFO -->
+    <section class="card hidden" id="event-card">
+      <div class="event-header">
+        <img id="event-icon" class="event-icon" alt="" />
+        <div>
+          <h2 id="event-title"></h2>
+          <div class="event-meta" id="event-meta"></div>
+        </div>
+      </div>
+      <details id="markets-details">
+        <summary><span id="markets-summary"></span></summary>
+        <div class="market-chips" id="market-chips"></div>
+        <button id="rerank-btn" class="secondary small hidden">Re-rank with selected markets</button>
+      </details>
+    </section>
+
+    <!-- RESULTS -->
+    <section class="card hidden" id="results-card">
+      <div class="results-header">
+        <div class="tabs" id="tabs">
+          <button class="tab active" data-window="d7">7D</button>
+          <button class="tab" data-window="d30">30D</button>
+          <button class="tab" data-window="all">All time</button>
+        </div>
+        <div class="results-actions">
+          <span id="results-count" class="muted"></span>
+          <button id="csv-btn" class="secondary small">Export CSV</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table id="results-table">
+          <thead>
+            <tr id="head-row"><!-- built by app.js (columns depend on scan mode) --></tr>
+          </thead>
+          <tbody id="results-body"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>
+      PnL figures come from Polymarket's public API and reflect each wallet's <strong>global</strong> profit
+    (across all their markets) in the selected window. "Vol. in event / Trades / Markets" show their activity
+      inside the scanned event. Not financial advice.
+    </p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
