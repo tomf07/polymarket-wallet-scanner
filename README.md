@@ -75,5 +75,5 @@ Notes & limitations:
 
 - **PnL is the wallet's global Polymarket PnL** (across all their markets), not just this event - that's what the 7D/30D/All-time windows measure. "Vol. in event", "Trades" and "Markets" columns show their activity inside the scanned event.
 - 7D/30D PnL = change over the window (last − first point of the series); All-time = last point of the lifetime series.
-- Wallet discovery covers the most recent 500–4,000 trades per market (configurable via "Trade scan depth"). The trades feed is taker-side fills, so in very high-volume markets older traders may fall outside the window - use a deeper scan depth there.
+- Wallet discovery covers the most recent 500–3,500 trades per market (configurable via "Trade scan depth"; ~3,500 is the public feed's hard ceiling). The trades feed is taker-side fills, so in very high-volume markets older traders may fall outside the window. **Max depth** compensates by also merging in each market's top 100 current holders per outcome - big wallets are found through their positions even when their trades are too old for the feed. Ranking in Max mode blends traded volume with held shares (valued at $0.50/share).
 - The public APIs are rate-limited; the scanner throttles itself (5 markets / 8 wallets in parallel) and retries with backoff on 429s. Big events with "Top 400" can take a couple of minutes.

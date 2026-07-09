@@ -16,6 +16,7 @@ const PNL_API = 'https://user-pnl-api.polymarket.com';
 const LB_API = 'https://lb-api.polymarket.com';
 
 const TRADES_PAGE_SIZE = 500;
+const TRADES_MAX_PAGES = 7; // the API rejects offsets past 3,000, so ~3,500 is the ceiling
 const ACTIVITY_PAGE_SIZE = 500;
 const ACTIVITY_MAX_PAGES = 4; // bulk scans: up to 2,000 recent activity events per wallet
 const DEEP_ACTIVITY_MAX_PAGES = 60; // on-demand "full history": up to 30,000 events
@@ -408,7 +409,7 @@ async function scanMarket(market, tradePages, mode) {
     if (patch.img && !w.img) w.img = patch.img;
   };
 
-  if (mode === 'holders') {
+  if (mode === 'holders' || mode === 'hybrid') {
     const holders = await fetchJson(`${DATA}/holders?market=${market.conditionId}&limit=100`);
     if (Array.isArray(holders)) {
       for (const tokenGroup of holders) {
@@ -422,10 +423,10 @@ async function scanMarket(market, tradePages, mode) {
         }
       }
     }
-    return wallets;
+    if (mode === 'holders') return wallets;
   }
 
-  for (let page = 0; page < tradePages; page++) {
+  for (let page = 0; page < Math.min(tradePages, TRADES_MAX_PAGES); page++) {
     if (state.cancelled) break;
     const trades = await fetchJson(
       `${DATA}/trades?market=${market.conditionId}&limit=${TRADES_PAGE_SIZE}&offset=${page * TRADES_PAGE_SIZE}`
@@ -760,8 +761,10 @@ async function runScan() {
     renderEvent();
 
     // 2. scan every market for wallets
-    state.mode = els.depth.value === 'holders' ? 'holders' : 'trades';
-    const tradePages = state.mode === 'holders' ? 0 : parseInt(els.depth.value, 10);
+    state.mode =
+      els.depth.value === 'holders' ? 'holders' : els.depth.value === 'hybrid' ? 'hybrid' : 'trades';
+    const tradePages =
+      state.mode === 'holders' ? 0 : state.mode === 'hybrid' ? TRADES_MAX_PAGES : parseInt(els.depth.value, 10);
     let done = 0;
     await pool(markets, MARKET_CONCURRENCY, async (m) => {
       const wallets = await scanMarket(m, tradePages, state.mode);
@@ -860,12 +863,16 @@ async function rankAndFetchPnl() {
   const anyFilter = f.maxViews != null || f.maxArb != null || pnlFilterOn || winFilterOn;
   state.winMetricsOn = f.winMetricsOn;
 
-  // rank: traded USD volume (trades mode) or shares held (holders mode)
+  // rank: traded USD volume (trades mode), shares held (holders mode), or a
+  // blend (hybrid: shares valued at ~$0.50 each so holders-only whales rank too)
   const ranked = [...agg.entries()]
     .map(([addr, a]) => ({
       addr,
       ...a,
-      score: state.mode === 'holders' ? a.shares : a.vol,
+      score:
+        state.mode === 'holders' ? a.shares :
+        state.mode === 'hybrid' ? a.vol + a.shares * 0.5 :
+        a.vol,
       arbPct: a.trades > 0 ? (a.opp / a.trades) * 100 : null,
     }))
     .sort((x, y) => y.score - x.score || y.trades - x.trades);
@@ -1057,16 +1064,25 @@ function columnsForMode() {
       : []),
     { key: 'views', label: 'Views' },
   ];
-  return state.mode === 'holders'
-    ? [...common,
-        { key: 'arbPct', label: 'Hedged %' },
-        { key: 'shares', label: 'Shares held' },
-        { key: 'markets', label: 'Markets' }]
-    : [...common,
-        { key: 'arbPct', label: 'Arb %' },
-        { key: 'vol', label: 'Vol. in event' },
-        { key: 'trades', label: 'Trades' },
-        { key: 'markets', label: 'Markets' }];
+  if (state.mode === 'holders') {
+    return [...common,
+      { key: 'arbPct', label: 'Hedged %' },
+      { key: 'shares', label: 'Shares held' },
+      { key: 'markets', label: 'Markets' }];
+  }
+  if (state.mode === 'hybrid') {
+    return [...common,
+      { key: 'arbPct', label: 'Arb %' },
+      { key: 'vol', label: 'Vol. in event' },
+      { key: 'trades', label: 'Trades' },
+      { key: 'shares', label: 'Shares held' },
+      { key: 'markets', label: 'Markets' }];
+  }
+  return [...common,
+    { key: 'arbPct', label: 'Arb %' },
+    { key: 'vol', label: 'Vol. in event' },
+    { key: 'trades', label: 'Trades' },
+    { key: 'markets', label: 'Markets' }];
 }
 
 function renderResults() {

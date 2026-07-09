@@ -95,13 +95,13 @@
         </div>
         <div class="option">
           <label for="depth">Trade scan depth
-            <span class="info" tabindex="0" data-tip="How thoroughly each market is searched for traders. Deeper = more wallets, slower scan.">i</span>
+            <span class="info" tabindex="0" data-tip="How thoroughly each market is searched for traders. Deeper = more wallets, slower scan. Max also includes each market's current top holders.">i</span>
           </label>
           <select id="depth">
             <option value="1">Fast (500 trades/market)</option>
             <option value="2" selected>Normal (1,000 trades/market)</option>
             <option value="4">Deep (2,000 trades/market)</option>
-            <option value="8">Max (4,000 trades/market)</option>
+            <option value="hybrid">Max (all available trades + top holders)</option>
             <option value="holders">Top holders (rank by position size)</option>
           </select>
         </div>
