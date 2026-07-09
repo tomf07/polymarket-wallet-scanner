@@ -410,7 +410,33 @@ td.rank.top3 { color: #ffd76a; font-weight: 700; }
   padding: 14px 18px 16px;
   white-space: normal;
 }
-.bets-summary { margin-bottom: 8px; }
+.bets-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+  max-width: 720px;
+}
+.bets-sort {
+  display: inline-flex;
+  gap: 4px;
+  background: var(--bg-card);
+  padding: 3px;
+  border-radius: 8px;
+}
+.bets-sort-btn {
+  background: transparent;
+  color: var(--text-dim);
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 0.75rem;
+}
+.bets-sort-btn.active {
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  color: white;
+}
 .bets-label {
   color: var(--text-dim);
   font-size: 0.72rem;

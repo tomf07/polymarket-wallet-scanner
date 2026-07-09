@@ -127,6 +127,7 @@ const state = {
   activeWindow: 'd7',
   mode: 'trades', // 'trades' | 'holders' — how wallets were discovered/ranked
   scanMode: 'event', // 'event' | 'category' — which main tab drives the scan
+  betsSortMode: null, // null = auto from filters; 'pct' | 'usd' once the user picks
 };
 
 /* ---------------- fetch helpers ---------------- */
@@ -673,8 +674,15 @@ async function fetchWalletWinMetrics(addr, deep = false, onProgress = null) {
     });
   }
   bets.sort((x, y) => y.retPct - x.retPct);
-  // cap kept bets but preserve both tails, or big wallets lose their losses
-  const kept = bets.length > 200 ? [...bets.slice(0, 100), ...bets.slice(-100)] : bets;
+  // cap kept bets but preserve the extremes of BOTH sort orders (% and $),
+  // or big wallets lose their losses / their big-$-small-% wins
+  let kept = bets;
+  if (bets.length > 200) {
+    const pick = new Set([...bets.slice(0, 100), ...bets.slice(-100)]);
+    const byProfit = [...bets].sort((x, y) => y.profit - x.profit);
+    for (const b of [...byProfit.slice(0, 50), ...byProfit.slice(-50)]) pick.add(b);
+    kept = [...pick];
+  }
 
   const metrics = {
     volume,
@@ -1138,15 +1146,18 @@ function renderBets(win, addr) {
     return '<span class="muted">No scoreable closed bets in this wallet\'s recent history (last ~2,000 events; still-open and split/merge markets are excluded).</span>';
   }
   const f = readFilters();
-  const byDollar = f.minRoi != null && f.minAvgWin == null; // ROI filter → $ view
+  // explicit user choice wins; otherwise ROI-filter context implies the $ view
+  const byDollar = state.betsSortMode
+    ? state.betsSortMode === 'usd'
+    : f.minRoi != null && f.minAvgWin == null;
   const wins = bets
     .filter((b) => b.retPct > 0)
     .sort((x, y) => (byDollar ? y.profit - x.profit : y.retPct - x.retPct))
     .slice(0, 10);
   const losses = bets
     .filter((b) => b.retPct <= 0)
-    .sort((x, y) => x.retPct - y.retPct)
-    .slice(0, 3);
+    .sort((x, y) => (byDollar ? x.profit - y.profit : x.retPct - y.retPct))
+    .slice(0, 5);
 
   const fmtWhen = (ts) =>
     ts ? new Date(ts * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' }) : '';
@@ -1183,13 +1194,26 @@ function renderBets(win, addr) {
     ? `<span class="muted">full history · ${win.eventsScanned.toLocaleString()} events</span>`
     : `<button class="secondary small deep-btn" data-addr="${addr}">Load full history (last ${win.eventsScanned.toLocaleString()} events scanned — slower)</button>`;
   return `
-    <div class="muted bets-summary">${nBets.toLocaleString()} closed bets · ${nWins.toLocaleString()} won${gl} · sorted by ${byDollar ? '$ profit' : '% return'}</div>
+    <div class="bets-head">
+      <span class="muted bets-summary">${nBets.toLocaleString()} closed bets · ${nWins.toLocaleString()} won${gl}</span>
+      <span class="bets-sort" role="group" aria-label="Sort bets by">
+        <button class="bets-sort-btn ${byDollar ? '' : 'active'}" data-mode="pct" data-addr="${addr}">% return</button>
+        <button class="bets-sort-btn ${byDollar ? 'active' : ''}" data-mode="usd" data-addr="${addr}">$ profit</button>
+      </span>
+    </div>
     ${section(byDollar ? 'Biggest wins ($)' : 'Biggest wins (%)', wins)}
-    ${section('Worst losses', losses)}
+    ${section(byDollar ? 'Worst losses ($)' : 'Worst losses (%)', losses)}
     <div class="bets-foot">${scope}</div>`;
 }
 
 els.resultsBody.addEventListener('click', async (e) => {
+  const sortBtn = e.target.closest('.bets-sort-btn');
+  if (sortBtn) {
+    state.betsSortMode = sortBtn.dataset.mode; // remembered for every panel this session
+    const win = state.winCache.get(sortBtn.dataset.addr);
+    if (win) sortBtn.closest('td').innerHTML = renderBets(win, sortBtn.dataset.addr);
+    return;
+  }
   const deepBtn = e.target.closest('.deep-btn');
   if (deepBtn) {
     const cell = deepBtn.closest('td');
