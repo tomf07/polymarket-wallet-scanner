@@ -143,6 +143,17 @@
         </div>
 
         <div class="filter-group">
+          <span class="filter-title">Lifetime trade count
+            <span class="info" tabindex="0" data-tip="Total trades the wallet has ever made. Min filters out one-hit lucky wallets, max filters out bots.">i</span>
+          </span>
+          <div class="bounds-grid">
+            <span>Trades</span>
+            <input type="number" id="min-trades" min="0" placeholder="min" />
+            <input type="number" id="max-trades" min="0" placeholder="max" />
+          </div>
+        </div>
+
+        <div class="filter-group">
           <span class="filter-title">Wallet type (win metrics)
             <span class="info" tabindex="0" data-tip="Adds ROI, win rate, avg win % and gain/loss columns for each wallet. Makes scans slower.">i</span>
           </span>

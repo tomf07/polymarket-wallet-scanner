@@ -88,6 +88,8 @@ const els = {
   minAll: $('#min-all'),
   maxAll: $('#max-all'),
   maxArb: $('#max-arb'),
+  minTrades: $('#min-trades'),
+  maxTrades: $('#max-trades'),
   winMetrics: $('#win-metrics'),
   walletType: $('#wallet-type'),
   minRoi: $('#min-roi'),
@@ -886,6 +888,8 @@ function readFilters() {
       all: { min: num(els.minAll), max: num(els.maxAll) },
     },
     maxArb: num(els.maxArb),
+    minTrades: num(els.minTrades),
+    maxTrades: num(els.maxTrades),
     minRoi,
     minWinRate,
     minAvgWin,
@@ -916,7 +920,8 @@ async function rankAndFetchPnl() {
     f.exRed.d7 || f.exRed.d30 || f.exRed.all ||
     Object.values(f.bounds).some((b) => b.min != null || b.max != null);
   const winFilterOn = f.minRoi != null || f.minWinRate != null || f.minAvgWin != null || f.minPlRatio != null;
-  const anyFilter = f.maxViews != null || f.maxArb != null || pnlFilterOn || winFilterOn;
+  const tradeCountFilterOn = f.minTrades != null || f.maxTrades != null;
+  const anyFilter = f.maxViews != null || f.maxArb != null || pnlFilterOn || winFilterOn || tradeCountFilterOn;
   state.winMetricsOn = f.winMetricsOn;
 
   // rank: traded USD volume (trades mode), shares held (holders mode), or a
@@ -961,10 +966,19 @@ async function rankAndFetchPnl() {
       return;
     }
 
-    // 2. profile views gate - 1 cheap call before the 3 PnL calls
+    // 2. profile gates (views + lifetime trade count) - 1 cheap call before the 3 PnL calls
     const stats = await fetchWalletStats(w.addr);
     const views = stats ? stats.views : null;
+    const lifeTrades = stats && typeof stats.trades === 'number' ? stats.trades : null;
     if (f.maxViews != null && (views == null || views > f.maxViews)) {
+      skipped++;
+      progress();
+      return;
+    }
+    if (
+      (f.minTrades != null && (lifeTrades == null || lifeTrades < f.minTrades)) ||
+      (f.maxTrades != null && (lifeTrades == null || lifeTrades > f.maxTrades))
+    ) {
       skipped++;
       progress();
       return;
@@ -1018,6 +1032,7 @@ async function rankAndFetchPnl() {
       arbPct: w.arbPct,
       markets: w.markets.size,
       views,
+      lifeTrades,
       d7: pnl.d7,
       d30: pnl.d30,
       all: pnl.all,
@@ -1120,6 +1135,7 @@ function columnsForMode() {
         ]
       : []),
     { key: 'views', label: 'Views' },
+    { key: 'lifeTrades', label: 'All trades' },
   ];
   if (state.mode === 'holders') {
     return [...common,
@@ -1171,6 +1187,7 @@ function renderResults() {
           ? '<td class="num na">-</td>'
           : `<td class="num ${r.plRatio < 1 ? 'neg' : ''}">${r.plRatio === Infinity ? '∞' : r.plRatio.toFixed(1) + '×'}</td>`;
       case 'views': return `<td class="num">${r.views == null ? '-' : fmtCount(r.views)}</td>`;
+      case 'lifeTrades': return `<td class="num">${r.lifeTrades == null ? '-' : fmtCount(r.lifeTrades)}</td>`;
       case 'arbPct': return `<td class="num">${r.arbPct == null ? '-' : r.arbPct.toFixed(0) + '%'}</td>`;
       case 'vol': return `<td class="num">${fmtUsd(r.vol)}</td>`;
       case 'trades': return `<td class="num">${r.trades.toLocaleString()}</td>`;
@@ -1337,7 +1354,7 @@ function exportCsv() {
   const key = state.sortKey;
   const rows = [...state.rows].sort((a, b) => (b[key] ?? -Infinity) - (a[key] ?? -Infinity));
   const lines = [
-    'rank,address,name,pnl_7d,pnl_30d,pnl_all_time,roi_pct,win_rate_pct,avg_win_pct,gain_loss_ratio,closed_bets,profile_views,arb_pct,volume_in_event,trades_in_event,shares_held,markets_in_event,profile_url',
+    'rank,address,name,pnl_7d,pnl_30d,pnl_all_time,roi_pct,win_rate_pct,avg_win_pct,gain_loss_ratio,closed_bets,profile_views,lifetime_trades,arb_pct,volume_in_event,trades_in_event,shares_held,markets_in_event,profile_url',
     ...rows.map((r, i) =>
       [
         i + 1,
@@ -1352,6 +1369,7 @@ function exportCsv() {
         r.plRatio == null ? '' : r.plRatio === Infinity ? 'inf' : r.plRatio.toFixed(2),
         r.closedBets ?? '',
         r.views ?? '',
+        r.lifeTrades ?? '',
         r.arbPct == null ? '' : r.arbPct.toFixed(1),
         r.vol.toFixed(2),
         r.trades,
