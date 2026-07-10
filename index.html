@@ -17,13 +17,13 @@
     <!-- INPUT -->
     <section class="card" id="input-card">
       <div class="main-tabs" id="main-tabs">
-        <button class="main-tab active" data-mode="event">Event scan</button>
-        <button class="main-tab" data-mode="category">Best of category</button>
+        <button class="main-tab active" data-mode="category">Best of category</button>
+        <button class="main-tab" data-mode="event">Event scan</button>
         <button class="main-tab" data-mode="btc">BTC up/down</button>
         <button class="main-tab" data-mode="gamble">Wallet gambling</button>
       </div>
 
-      <div id="panel-event">
+      <div id="panel-event" class="hidden">
         <label for="url-input">Polymarket event or market link</label>
         <div class="input-row">
           <input
@@ -36,7 +36,7 @@
         </div>
       </div>
 
-      <div id="panel-category" class="hidden">
+      <div id="panel-category">
         <label for="category-select">Market category - scans the top open events by 24h volume</label>
         <div class="input-row">
           <select id="category-select">

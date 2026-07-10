@@ -133,7 +133,7 @@ const state = {
   sortKey: 'd7',
   activeWindow: 'd7',
   mode: 'trades', // 'trades' | 'holders' - how wallets were discovered/ranked
-  scanMode: 'event', // 'event' | 'category' - which main tab drives the scan
+  scanMode: 'category', // which main tab drives the scan (category is the default)
   betsSortMode: null, // null = auto from filters; 'pct' | 'usd' once the user picks
   degenRoll: false, // gamble tab: next roll digs outside the top 100 by volume
 };
