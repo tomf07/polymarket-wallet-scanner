@@ -143,6 +143,17 @@
         </div>
 
         <div class="filter-group">
+          <span class="filter-title">Wallet age (days)
+            <span class="info" tabindex="0" data-tip="Days since the wallet's first trade. Min avoids brand-new wallets, max finds fresh ones.">i</span>
+          </span>
+          <div class="bounds-grid">
+            <span>Age</span>
+            <input type="number" id="min-age" min="0" placeholder="min" />
+            <input type="number" id="max-age" min="0" placeholder="max" />
+          </div>
+        </div>
+
+        <div class="filter-group">
           <span class="filter-title">Lifetime trade count
             <span class="info" tabindex="0" data-tip="Total trades the wallet has ever made. Min filters out one-hit lucky wallets, max filters out bots.">i</span>
           </span>

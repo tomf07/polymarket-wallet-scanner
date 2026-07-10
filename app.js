@@ -90,6 +90,8 @@ const els = {
   maxArb: $('#max-arb'),
   minTrades: $('#min-trades'),
   maxTrades: $('#max-trades'),
+  minAge: $('#min-age'),
+  maxAge: $('#max-age'),
   winMetrics: $('#win-metrics'),
   walletType: $('#wallet-type'),
   minRoi: $('#min-roi'),
@@ -551,6 +553,7 @@ async function fetchWalletPnl(addr) {
     d7: delta(w7),
     d30: delta(w30),
     all: wAll ? wAll[wAll.length - 1].p : null, // cumulative series → last point = lifetime PnL
+    firstTs: wAll && wAll[0] ? wAll[0].t : null, // series starts at the wallet's first trade
   };
   state.pnlCache.set(addr, result);
   return result;
@@ -890,6 +893,8 @@ function readFilters() {
     maxArb: num(els.maxArb),
     minTrades: num(els.minTrades),
     maxTrades: num(els.maxTrades),
+    minAge: num(els.minAge),
+    maxAge: num(els.maxAge),
     minRoi,
     minWinRate,
     minAvgWin,
@@ -921,7 +926,9 @@ async function rankAndFetchPnl() {
     Object.values(f.bounds).some((b) => b.min != null || b.max != null);
   const winFilterOn = f.minRoi != null || f.minWinRate != null || f.minAvgWin != null || f.minPlRatio != null;
   const tradeCountFilterOn = f.minTrades != null || f.maxTrades != null;
-  const anyFilter = f.maxViews != null || f.maxArb != null || pnlFilterOn || winFilterOn || tradeCountFilterOn;
+  const ageFilterOn = f.minAge != null || f.maxAge != null;
+  const anyFilter =
+    f.maxViews != null || f.maxArb != null || pnlFilterOn || winFilterOn || tradeCountFilterOn || ageFilterOn;
   state.winMetricsOn = f.winMetricsOn;
 
   // rank: traded USD volume (trades mode), shares held (holders mode), or a
@@ -1003,6 +1010,17 @@ async function rankAndFetchPnl() {
       return;
     }
 
+    // 3b. wallet age gate (days since first trade, from the lifetime PnL series)
+    const ageDays = pnl.firstTs ? (Date.now() / 1000 - pnl.firstTs) / 86400 : null;
+    if (
+      (f.minAge != null && (ageDays == null || ageDays < f.minAge)) ||
+      (f.maxAge != null && (ageDays == null || ageDays > f.maxAge))
+    ) {
+      skipped++;
+      progress();
+      return;
+    }
+
     // 4. win-metric gates (ROI / win rate / avg win %) - opt-in, extra calls
     let win = null;
     if (f.winMetricsOn) {
@@ -1033,6 +1051,7 @@ async function rankAndFetchPnl() {
       markets: w.markets.size,
       views,
       lifeTrades,
+      ageDays,
       d7: pnl.d7,
       d30: pnl.d30,
       all: pnl.all,
@@ -1136,6 +1155,7 @@ function columnsForMode() {
       : []),
     { key: 'views', label: 'Views' },
     { key: 'lifeTrades', label: 'All trades' },
+    { key: 'ageDays', label: 'Age' },
   ];
   if (state.mode === 'holders') {
     return [...common,
@@ -1188,6 +1208,10 @@ function renderResults() {
           : `<td class="num ${r.plRatio < 1 ? 'neg' : ''}">${r.plRatio === Infinity ? '∞' : r.plRatio.toFixed(1) + '×'}</td>`;
       case 'views': return `<td class="num">${r.views == null ? '-' : fmtCount(r.views)}</td>`;
       case 'lifeTrades': return `<td class="num">${r.lifeTrades == null ? '-' : fmtCount(r.lifeTrades)}</td>`;
+      case 'ageDays':
+        return `<td class="num">${
+          r.ageDays == null ? '-' : r.ageDays < 365 ? Math.round(r.ageDays) + 'd' : (r.ageDays / 365).toFixed(1) + 'y'
+        }</td>`;
       case 'arbPct': return `<td class="num">${r.arbPct == null ? '-' : r.arbPct.toFixed(0) + '%'}</td>`;
       case 'vol': return `<td class="num">${fmtUsd(r.vol)}</td>`;
       case 'trades': return `<td class="num">${r.trades.toLocaleString()}</td>`;
@@ -1354,7 +1378,7 @@ function exportCsv() {
   const key = state.sortKey;
   const rows = [...state.rows].sort((a, b) => (b[key] ?? -Infinity) - (a[key] ?? -Infinity));
   const lines = [
-    'rank,address,name,pnl_7d,pnl_30d,pnl_all_time,roi_pct,win_rate_pct,avg_win_pct,gain_loss_ratio,closed_bets,profile_views,lifetime_trades,arb_pct,volume_in_event,trades_in_event,shares_held,markets_in_event,profile_url',
+    'rank,address,name,pnl_7d,pnl_30d,pnl_all_time,roi_pct,win_rate_pct,avg_win_pct,gain_loss_ratio,closed_bets,profile_views,lifetime_trades,wallet_age_days,arb_pct,volume_in_event,trades_in_event,shares_held,markets_in_event,profile_url',
     ...rows.map((r, i) =>
       [
         i + 1,
@@ -1370,6 +1394,7 @@ function exportCsv() {
         r.closedBets ?? '',
         r.views ?? '',
         r.lifeTrades ?? '',
+        r.ageDays == null ? '' : Math.round(r.ageDays),
         r.arbPct == null ? '' : r.arbPct.toFixed(1),
         r.vol.toFixed(2),
         r.trades,
