@@ -55,7 +55,18 @@
           </select>
           <label class="inline-label">Top
             <input type="number" id="cat-events" min="1" max="30" value="10" class="pct" />
-            events</label>
+            events by</label>
+          <select id="cat-window">
+            <option value="live1h">1h volume (measured live)</option>
+            <option value="live4h">4h volume (measured live)</option>
+            <option value="live6h">6h volume (measured live)</option>
+            <option value="live12h">12h volume (measured live)</option>
+            <option value="volume24hr" selected>24h volume</option>
+            <option value="volume1wk">7d volume</option>
+            <option value="volume1mo">30d volume</option>
+            <option value="volume1yr">1y volume</option>
+            <option value="volume">all-time volume</option>
+          </select>
         </div>
       </div>
 

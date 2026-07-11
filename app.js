@@ -32,6 +32,22 @@ const CATEGORY_LABELS = {
   science: 'Science', world: 'World', elections: 'Elections', geopolitics: 'Geopolitics',
 };
 const CAT_MARKETS_PER_EVENT = 12; // per event, keep category scans bounded (top by volume)
+// volume windows the gamma API can rank events by (shorter windows don't
+// exist there, so 1h/4h are measured live from each candidate's trade feed)
+const CAT_WINDOWS = {
+  live1h: { label: '1h', liveHours: 1 },
+  live4h: { label: '4h', liveHours: 4 },
+  live6h: { label: '6h', liveHours: 6 },
+  live12h: { label: '12h', liveHours: 12 },
+  volume24hr: { label: '24h' },
+  volume1wk: { label: '7d' },
+  volume1mo: { label: '30d' },
+  volume1yr: { label: '1y' },
+  volume: { label: 'all-time' },
+};
+const LIVE_MARKETS_MEASURED = 4; // top markets per event used for the measurement
+const LIVE_MAX_EVENTS_CHECKED = 300; // safety cap on the candidate walk
+const LIVE_CHUNK = 20; // measure candidates in chunks, checking the stop bound between them
 
 const MAX_BTC_MARKETS = 300; // hard cap per BTC time-frame scan
 const SLUG_BATCH = 20; // gamma /events accepts repeated slug params - batch lookups
@@ -70,6 +86,7 @@ const els = {
   degenBtn: $('#degen-btn'),
   categorySelect: $('#category-select'),
   catEventsN: $('#cat-events'),
+  catWindow: $('#cat-window'),
   btcTf: $('#btc-tf'),
   btcHours: $('#btc-hours'),
   marketsDetails: $('#markets-details'),
@@ -311,9 +328,55 @@ async function loadCategoryEvent() {
   const slug = els.categorySelect.value;
   const label = CATEGORY_LABELS[slug] || slug;
   const nEv = Math.min(30, Math.max(1, parseInt(els.catEventsN.value, 10) || 10));
-  const evs = await fetchJson(
-    `${GAMMA}/events?tag_slug=${encodeURIComponent(slug)}&closed=false&order=volume24hr&ascending=false&limit=${nEv}`
-  );
+  const windowKey = CAT_WINDOWS[els.catWindow.value] ? els.catWindow.value : 'volume24hr';
+  const wDef = CAT_WINDOWS[windowKey];
+
+  let evs;
+  let liveTotal = 0;
+  if (wDef.liveHours) {
+    // live window: walk the category's events in 24h-volume order, measuring
+    // each one's actual traded volume inside the window. Since window volume
+    // can never exceed 24h volume, we stop as soon as the next candidate's
+    // 24h volume is below our Nth-best measured window volume - at that point
+    // the top N is provably complete.
+    const cutoff = Date.now() / 1000 - wDef.liveHours * 3600;
+    const measured = [];
+    let offset = 0;
+    let stop = false;
+    let checked = 0;
+    while (!stop && offset < LIVE_MAX_EVENTS_CHECKED) {
+      const page = await fetchJson(
+        `${GAMMA}/events?tag_slug=${encodeURIComponent(slug)}&closed=false&order=volume24hr&ascending=false&limit=100&offset=${offset}`
+      );
+      if (!Array.isArray(page) || page.length === 0) break;
+      offset += page.length;
+      const cands = page.filter((e) => Array.isArray(e.markets) && e.markets.some((m) => m.conditionId));
+      for (let i = 0; i < cands.length && !stop; i += LIVE_CHUNK) {
+        const chunk = cands.slice(i, i + LIVE_CHUNK);
+        await pool(chunk, MARKET_CONCURRENCY, async (ev) => {
+          ev._liveVol = await measureEventWindow(ev, cutoff);
+          checked++;
+          setStatus(`Measuring ${wDef.label} volume… ${checked} events checked`, 2 + Math.min(4, checked / 25));
+        });
+        if (state.cancelled) throw new Error('cancelled');
+        measured.push(...chunk);
+        const nth = measured.map((e) => e._liveVol || 0).sort((a, b) => b - a)[nEv - 1] || 0;
+        const next = cands[i + LIVE_CHUNK];
+        if (nth > 0 && next && (Number(next.volume24hr) || 0) < nth) stop = true;
+      }
+      if (page.length < 100) break;
+    }
+    evs = measured
+      .filter((e) => (e._liveVol || 0) > 0)
+      .sort((a, b) => b._liveVol - a._liveVol)
+      .slice(0, nEv);
+    if (evs.length === 0) return null;
+    liveTotal = evs.reduce((s, e) => s + e._liveVol, 0);
+  } else {
+    evs = await fetchJson(
+      `${GAMMA}/events?tag_slug=${encodeURIComponent(slug)}&closed=false&order=${windowKey}&ascending=false&limit=${nEv}`
+    );
+  }
   if (!Array.isArray(evs) || evs.length === 0) return null;
 
   const markets = [];
@@ -327,7 +390,8 @@ async function loadCategoryEvent() {
   return {
     title: `Top wallets - ${label}`,
     icon: evs[0].icon || evs[0].image,
-    volume24h: evs.reduce((s, e) => s + (e.volume24hr || 0), 0),
+    volume24h: wDef.liveHours ? liveTotal : evs.reduce((s, e) => s + (Number(e[windowKey]) || 0), 0),
+    volLabel: wDef.label,
     scanEventIds: evs.map((e) => e.id).filter(Boolean),
     markets,
     isCategory: true,
@@ -386,6 +450,33 @@ async function loadBtcEvent() {
     isBtc: true,
     eventCount: events.length,
   };
+}
+
+/** Traded USD volume inside [cutoff, now] for one event, measured from its
+ *  top markets' trade feeds. Pages each market until the feed reaches back
+ *  past the cutoff, so the window is fully covered (up to the API's ceiling). */
+async function measureEventWindow(ev, cutoff) {
+  let v = 0;
+  const top = (ev.markets || [])
+    .filter((m) => m.conditionId)
+    .sort((a, b) => (b.volumeNum || 0) - (a.volumeNum || 0))
+    .slice(0, LIVE_MARKETS_MEASURED);
+  for (const m of top) {
+    for (let page = 0; page < TRADES_MAX_PAGES; page++) {
+      if (state.cancelled) return v;
+      const trades = await fetchJson(
+        `${DATA}/trades?market=${m.conditionId}&limit=${TRADES_PAGE_SIZE}&offset=${page * TRADES_PAGE_SIZE}`
+      );
+      if (!Array.isArray(trades) || trades.length === 0) break;
+      let pastCutoff = false;
+      for (const t of trades) {
+        if ((t.timestamp || 0) >= cutoff) v += (t.size || 0) * (t.price || 0);
+        else pastCutoff = true;
+      }
+      if (pastCutoff || trades.length < TRADES_PAGE_SIZE) break;
+    }
+  }
+  return v;
 }
 
 /** Gambling mode: roll a random topic, then a random active event in it, then
@@ -1084,7 +1175,8 @@ function renderEvent() {
   }
   els.marketsDetails.classList.toggle('hidden', !!ev.isBtc); // 100s of 5m chips = noise
   if (ev.isCategory) {
-    const vol = ev.volume24h ? `$${Math.round(ev.volume24h).toLocaleString()} ${ev.isBtc ? '' : '24h '}volume · ` : '';
+    const winLabel = ev.isBtc ? '' : `${ev.volLabel || '24h'} `;
+    const vol = ev.volume24h ? `$${Math.round(ev.volume24h).toLocaleString()} ${winLabel}volume · ` : '';
     els.eventMeta.textContent = `${vol}${ev.eventCount} ${ev.isBtc ? 'markets scanned' : 'events'}${ev.isBtc ? '' : ` · ${state.markets.length} markets`}`;
     els.marketsSummary.textContent = `Events scanned (${ev.eventCount}) - untick to exclude`;
   } else {
