@@ -84,6 +84,10 @@ const els = {
   panelBtc: $('#panel-btc'),
   panelGamble: $('#panel-gamble'),
   degenBtn: $('#degen-btn'),
+  panelCsv: $('#panel-csv'),
+  csvText: $('#csv-text'),
+  csvFile: $('#csv-file'),
+  csvCount: $('#csv-count'),
   categorySelect: $('#category-select'),
   catEventsN: $('#cat-events'),
   catWindow: $('#cat-window'),
@@ -153,7 +157,15 @@ const state = {
   scanMode: 'category', // which main tab drives the scan (category is the default)
   betsSortMode: null, // null = auto from filters; 'pct' | 'usd' once the user picks
   degenRoll: false, // gamble tab: next roll digs outside the top 100 by volume
+  csvAddrs: [], // wallet-list tab: addresses parsed from the pasted CSV/text
 };
+
+/** Pull unique wallet addresses out of arbitrary text (CSV, one per line,
+ *  comma separated…). Column layout and headers are irrelevant. */
+function parseAddresses(text) {
+  const found = String(text || '').match(/0x[a-fA-F0-9]{40}/g) || [];
+  return [...new Set(found.map((a) => a.toLowerCase()))];
+}
 
 /* ---------------- fetch helpers ---------------- */
 
@@ -858,6 +870,13 @@ async function runScan() {
       return;
     }
   }
+  if (state.scanMode === 'csv') {
+    state.csvAddrs = parseAddresses(els.csvText.value);
+    if (state.csvAddrs.length === 0) {
+      showError('No wallet addresses found. Paste a CSV or a list containing 0x… addresses.');
+      return;
+    }
+  }
 
   state.running = true;
   state.cancelled = false;
@@ -870,8 +889,19 @@ async function runScan() {
   els.rerankBtn.classList.add('hidden');
 
   try {
-    // 1. resolve scan target: one event, a category's top events, a BTC
-    // time-frame series, or a random gamble pick
+    // 1. resolve scan target. The wallet-list tab skips discovery entirely -
+    // the addresses are the input, so it goes straight to analysis.
+    if (state.scanMode === 'csv') {
+      state.mode = 'csv';
+      state.event = { title: 'Your wallet list', isCsv: true, walletCount: state.csvAddrs.length };
+      state.markets = [];
+      renderEvent();
+      await rankAndFetchPnl();
+      els.rerankBtn.classList.remove('hidden');
+      return;
+    }
+
+    // one event, a category's top events, a BTC time-frame series, or a random roll
     const isCat = state.scanMode === 'category';
     const isBtc = state.scanMode === 'btc';
     const isGamble = state.scanMode === 'gamble';
@@ -943,6 +973,14 @@ async function runScan() {
 }
 
 function aggregateWallets() {
+  if (state.scanMode === 'csv') {
+    // no market discovery - the user supplied the wallets
+    const agg = new Map();
+    for (const addr of state.csvAddrs) {
+      agg.set(addr, { vol: 0, trades: 0, shares: 0, opp: 0, markets: new Set(), name: '', img: '' });
+    }
+    return agg;
+  }
   const agg = new Map(); // addr -> {vol, trades, markets:Set, name, img}
   for (const m of state.markets) {
     if (!m.selected) continue;
@@ -1010,7 +1048,12 @@ function pnlPasses(pnl, f) {
 
 async function rankAndFetchPnl() {
   const agg = aggregateWallets();
-  const topN = Math.min(100, Math.max(5, parseInt(els.topN.value, 10) || 100));
+  // a pasted wallet list is deliberate, so it is analysed in full - the cap
+  // only exists to bound open-ended market discovery
+  const topN =
+    state.scanMode === 'csv'
+      ? agg.size
+      : Math.min(100, Math.max(5, parseInt(els.topN.value, 10) || 100));
   const f = readFilters();
   const pnlFilterOn =
     f.exRed.d7 || f.exRed.d30 || f.exRed.all ||
@@ -1038,7 +1081,10 @@ async function rankAndFetchPnl() {
 
   // With filters on we walk further down the ranking, skipping rejected
   // wallets, until the quota is filled (checking up to 5× topN candidates).
-  const candidates = ranked.slice(0, anyFilter ? Math.min(ranked.length, Math.max(topN * 5, 300)) : topN);
+  const candidates =
+    state.scanMode === 'csv'
+      ? ranked
+      : ranked.slice(0, anyFilter ? Math.min(ranked.length, Math.max(topN * 5, 300)) : topN);
 
   setStatus(`Found ${agg.size.toLocaleString()} wallets - analyzing top ${Math.min(topN, candidates.length)}…`, 42);
 
@@ -1173,7 +1219,13 @@ function renderEvent() {
   } else {
     els.eventIcon.classList.add('hidden');
   }
-  els.marketsDetails.classList.toggle('hidden', !!ev.isBtc); // 100s of 5m chips = noise
+  els.marketsDetails.classList.toggle('hidden', !!ev.isBtc || !!ev.isCsv); // 100s of 5m chips = noise
+  if (ev.isCsv) {
+    els.eventIcon.classList.add('hidden');
+    els.eventMeta.textContent = `${ev.walletCount.toLocaleString()} wallet${ev.walletCount === 1 ? '' : 's'} pasted`;
+    els.marketChips.innerHTML = '';
+    return;
+  }
   if (ev.isCategory) {
     const winLabel = ev.isBtc ? '' : `${ev.volLabel || '24h'} `;
     const vol = ev.volume24h ? `$${Math.round(ev.volume24h).toLocaleString()} ${winLabel}volume · ` : '';
@@ -1249,6 +1301,7 @@ function columnsForMode() {
     { key: 'lifeTrades', label: 'All trades' },
     { key: 'ageDays', label: 'Age' },
   ];
+  if (state.mode === 'csv') return common; // no event context to report
   if (state.mode === 'holders') {
     return [...common,
       { key: 'arbPct', label: 'Hedged %' },
@@ -1325,7 +1378,7 @@ function renderResults() {
           <button class="expand-btn" data-addr="${r.addr}" title="Show this trader's relevant closed bets">▸</button>
           ${avatar}
           <a href="https://polymarket.com/profile/${r.addr}" target="_blank" rel="noopener">
-            ${esc(display)}<span class="addr">${shortAddr(r.addr)}</span>
+            ${esc(display)}${r.name ? `<span class="addr">${shortAddr(r.addr)}</span>` : ''}
           </a></div></td>
         ${cols.map((c) => cell(r, c)).join('')}
       </tr>`;
@@ -1535,7 +1588,29 @@ els.mainTabs.addEventListener('click', (e) => {
   els.panelCategory.classList.toggle('hidden', state.scanMode !== 'category');
   els.panelBtc.classList.toggle('hidden', state.scanMode !== 'btc');
   els.panelGamble.classList.toggle('hidden', state.scanMode !== 'gamble');
+  els.panelCsv.classList.toggle('hidden', state.scanMode !== 'csv');
+  // no discovery step in wallet-list mode, so its knobs do not apply
+  els.depth.closest('.option').classList.toggle('hidden', state.scanMode === 'csv');
+  els.topN.closest('.option').classList.toggle('hidden', state.scanMode === 'csv');
   updateDepthAvailability();
+});
+
+// wallet list: live address count + CSV file loading
+function refreshCsvCount() {
+  const n = parseAddresses(els.csvText.value).length;
+  els.csvCount.textContent = n === 0 ? 'no addresses yet' : `${n.toLocaleString()} address${n === 1 ? '' : 'es'} found`;
+}
+els.csvText.addEventListener('input', refreshCsvCount);
+els.csvFile.addEventListener('change', (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    els.csvText.value = String(reader.result || '');
+    refreshCsvCount();
+  };
+  reader.readAsText(file);
+  e.target.value = ''; // let the same file be picked again
 });
 
 els.btcTf.addEventListener('change', updateDepthAvailability);

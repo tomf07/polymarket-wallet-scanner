@@ -21,6 +21,7 @@
         <button class="main-tab" data-mode="event">Event scan</button>
         <button class="main-tab" data-mode="btc">BTC up/down</button>
         <button class="main-tab" data-mode="gamble">Wallet gambling</button>
+        <button class="main-tab" data-mode="csv">Wallet list</button>
       </div>
 
       <div id="panel-event" class="hidden">
@@ -91,6 +92,18 @@
         <label>Wallet gambling - one random market from a random topic</label>
         <div class="gamble-hint">Feeling lucky? Hit Scan to roll a random active market. Your filters below still apply, so the dice only land on wallets that pass them. Or, if liquidity is for cowards:</div>
         <button id="degen-btn" type="button">Degen mode</button>
+      </div>
+
+      <div id="panel-csv" class="hidden">
+        <label for="csv-text">Your own wallet list - paste a CSV or addresses
+          <span class="info" tabindex="0" data-tip="Any text containing wallet addresses works: a CSV, one per line, or comma separated. Extra columns and headers are ignored.">i</span>
+        </label>
+        <textarea id="csv-text" rows="5" spellcheck="false" autocomplete="off"
+          placeholder="0x14c32680ffc318892e0d019181e4161aa34cdf68, 0xd1c7...&#10;or drop in a CSV exported from anywhere - columns and headers are ignored"></textarea>
+        <div class="csv-row">
+          <label class="file-btn">Load CSV file<input type="file" id="csv-file" accept=".csv,.txt,text/csv,text/plain" /></label>
+          <span class="muted" id="csv-count">no addresses yet</span>
+        </div>
       </div>
 
       <div class="input-row action-row">

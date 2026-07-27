@@ -109,6 +109,34 @@ main {
 
 .gamble-hint { color: var(--text-dim); font-size: 0.88rem; line-height: 1.5; }
 
+#csv-text {
+  width: 100%;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 12px 14px;
+  font-family: "SF Mono", ui-monospace, Menlo, monospace;
+  font-size: 0.82rem;
+  line-height: 1.6;
+  resize: vertical;
+  outline: none;
+}
+#csv-text:focus { border-color: var(--accent); }
+.csv-row { display: flex; align-items: center; gap: 12px; margin-top: 10px; flex-wrap: wrap; }
+.file-btn {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.file-btn:hover { border-color: var(--accent); color: var(--accent); }
+.file-btn input { display: none; }
+
 #degen-btn {
   margin-top: 14px;
   padding: 14px 38px;

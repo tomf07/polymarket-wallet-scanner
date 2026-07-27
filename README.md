@@ -6,6 +6,8 @@ Three scan modes (main tabs):
 - **Best of category** - pick a category (Sports, Politics, Crypto, Esports, Pop culture, …) and MarkyScan pulls the category's top N open events by 24h volume (default 10, max 30), takes up to 12 highest-volume markets per event, and runs the exact same wallet pipeline and filters across all of them. The markets list shows one chip per event - untick to exclude that whole event and re-rank.
 - **BTC up/down** - scans *every* Bitcoin Up-or-Down market of a chosen time-frame (5m / 15m / 1h / 4h / daily) in the lookback window (default 24h → 288 five-minute markets; capped at 300 markets). Slugs are deterministic (`btc-updown-5m-{unix}`, `btc-updown-4h-{unix}`, ET-date slugs for hourly/daily), resolved in batched gamma lookups, then the standard pipeline runs. The "Markets" column becomes a regularity signal - how many time-slots the wallet traded. Tip: the **Arb % filter** matters most here; the top of the board is usually hedge bots trading both Up and Down.
 
+- **Wallet list** - paste a CSV (or any text containing `0x…` addresses, one per line or comma separated) or load a `.csv` file, and MarkyScan skips discovery entirely: it analyses exactly those wallets and ranks them by the usual metrics. Headers, extra columns and junk lines are ignored; duplicates are collapsed. Round-trips with this tool's own CSV export. No cap - every pasted wallet is analysed, so "Max profiles to check" and "Trade scan depth" are hidden in this mode (they only bound open-ended market discovery).
+
 For an event scan, MarkyScan will:
 
 1. Resolve the full event and **all** its markets (for a soccer game: moneyline, over/under, corners, cards, etc. - everything under the event).
