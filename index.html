@@ -22,6 +22,7 @@
         <button class="main-tab" data-mode="btc">BTC up/down</button>
         <button class="main-tab" data-mode="gamble">Wallet gambling</button>
         <button class="main-tab" data-mode="csv">Wallet list</button>
+        <button class="main-tab" data-mode="copier">Copiers</button>
       </div>
 
       <div id="panel-event" class="hidden">
@@ -103,6 +104,33 @@
         <div class="csv-row">
           <label class="file-btn">Load CSV file<input type="file" id="csv-file" accept=".csv,.txt,text/csv,text/plain" /></label>
           <span class="muted" id="csv-count">no addresses yet</span>
+        </div>
+      </div>
+
+      <div id="panel-copier" class="hidden">
+        <label for="copier-input">Who copies this wallet? - paste an address or profile link
+          <span class="info" tabindex="0" data-tip="Finds wallets that repeatedly mirror this one's trades within seconds. Trades made just before the target are used as a control, so busy-market coincidences are not counted as copying.">i</span>
+        </label>
+        <div class="input-row">
+          <input id="copier-input" type="text" spellcheck="false" autocomplete="off"
+            placeholder="0x14c32680ffc318892e0d019181e4161aa34cdf68  (or a polymarket.com/profile/… link)" />
+        </div>
+        <div class="input-row copier-opts">
+          <label class="inline-label">Copy window
+            <select id="copier-window">
+              <option value="3">3 seconds</option>
+              <option value="5" selected>5 seconds</option>
+              <option value="10">10 seconds</option>
+              <option value="30">30 seconds</option>
+            </select>
+          </label>
+          <label class="inline-label">Trades analysed
+            <select id="copier-trades">
+              <option value="20">last 20</option>
+              <option value="40" selected>last 40</option>
+              <option value="80">last 80</option>
+            </select>
+          </label>
         </div>
       </div>
 

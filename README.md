@@ -8,6 +8,8 @@ Three scan modes (main tabs):
 
 - **Wallet list** - paste a CSV (or any text containing `0x…` addresses, one per line or comma separated) or load a `.csv` file, and MarkyScan skips discovery entirely: it analyses exactly those wallets and ranks them by the usual metrics. Headers, extra columns and junk lines are ignored; duplicates are collapsed. Round-trips with this tool's own CSV export. No cap - every pasted wallet is analysed, so "Max profiles to check" and "Trade scan depth" are hidden in this mode (they only bound open-ended market discovery).
 
+- **Copiers** - paste a wallet and find who copy-trades it. For each of the target's recent trades, the scanner looks for other wallets taking the *same* outcome and side within a few seconds (window configurable: 3/5/10/30s). Crucially, it also counts same-side trades in the equally long window *before* each target trade as a control: a genuine copier only acts afterwards, while a wallet that simply trades the same busy market appears just as often before, and is discounted. Reported as **likely copiers** (≥3 follows, at least twice as many follows as leads, and either ≥2 distinct markets or never once leading) plus the wider **repeat followers** count and an overall follow/lead ratio. Copiers are then run through the normal PnL/metric enrichment, so you can see whether a wallet's copiers are actually making money.
+
 For an event scan, MarkyScan will:
 
 1. Resolve the full event and **all** its markets (for a soccer game: moneyline, over/under, corners, cards, etc. - everything under the event).

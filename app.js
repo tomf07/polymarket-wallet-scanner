@@ -88,6 +88,10 @@ const els = {
   csvText: $('#csv-text'),
   csvFile: $('#csv-file'),
   csvCount: $('#csv-count'),
+  panelCopier: $('#panel-copier'),
+  copierInput: $('#copier-input'),
+  copierWindow: $('#copier-window'),
+  copierTrades: $('#copier-trades'),
   categorySelect: $('#category-select'),
   catEventsN: $('#cat-events'),
   catWindow: $('#cat-window'),
@@ -158,6 +162,7 @@ const state = {
   betsSortMode: null, // null = auto from filters; 'pct' | 'usd' once the user picks
   degenRoll: false, // gamble tab: next roll digs outside the top 100 by volume
   csvAddrs: [], // wallet-list tab: addresses parsed from the pasted CSV/text
+  copierStats: new Map(), // copier tab: addr -> {follows, before, markets, medDelay}
 };
 
 /** Pull unique wallet addresses out of arbitrary text (CSV, one per line,
@@ -461,6 +466,157 @@ async function loadBtcEvent() {
     isCategory: true, // reuse category-style meta/chips rendering
     isBtc: true,
     eventCount: events.length,
+  };
+}
+
+/* ---------------- copier detection ---------------- */
+
+const COPIER_MAX_MARKETS = 10; // distinct markets of the target to examine
+const COPIER_MIN_FOLLOWS = 2; // candidates below this are coincidence, not copying
+// A "likely copier" follows repeatedly, rarely leads, and shows one of the two
+// strong patterns: following across several markets (they track the wallet,
+// not the market), or never once trading ahead of it.
+const COPIER_LIKELY = { follows: 3, markets: 2, ratio: 2 };
+
+/** Recent TRADE events for one wallet (newest first). */
+async function recentWalletTrades(addr, pages = 2) {
+  const out = [];
+  let cursor = null;
+  for (let p = 0; p < pages; p++) {
+    if (state.cancelled) break;
+    const page = await fetchJson(
+      `${DATA}/activity?user=${addr}&limit=${ACTIVITY_PAGE_SIZE}` + (cursor != null ? `&end=${cursor}` : '')
+    );
+    if (!Array.isArray(page) || page.length === 0) break;
+    out.push(...page);
+    if (page.length < ACTIVITY_PAGE_SIZE) break;
+    const oldest = page[page.length - 1].timestamp;
+    cursor = oldest === cursor ? oldest - 1 : oldest;
+  }
+  return out.filter((a) => a.type === 'TRADE' && a.conditionId);
+}
+
+/** Copier scan: find wallets that mirror the target's trades within `window`
+ *  seconds. Trades in the equally-long window BEFORE each target trade are the
+ *  control - a real copier acts only after, while a wallet that simply trades
+ *  the same busy market appears just as often before, so it is discounted. */
+async function loadCopierScan() {
+  const raw = els.copierInput.value.trim();
+  const m = raw.match(/0x[a-fA-F0-9]{40}/);
+  if (!m) return null;
+  const target = m[0].toLowerCase();
+  const windowS = parseInt(els.copierWindow.value, 10) || 5;
+  const maxTrades = parseInt(els.copierTrades.value, 10) || 40;
+
+  setStatus('Loading the wallet’s recent trades…', 4);
+  const trades = (await recentWalletTrades(target)).slice(0, maxTrades);
+  if (trades.length === 0) return { empty: true, target };
+
+  // group the target's trades by market, newest markets first
+  const byMarket = new Map();
+  for (const t of trades) {
+    if (!byMarket.has(t.conditionId)) byMarket.set(t.conditionId, []);
+    byMarket.get(t.conditionId).push(t);
+  }
+  const markets = [...byMarket.entries()].slice(0, COPIER_MAX_MARKETS);
+
+  const follows = new Map(); // addr -> count of target trades followed
+  const before = new Map(); // addr -> count in the control window
+  const fMarkets = new Map(); // addr -> Set(conditionId)
+  const delays = new Map(); // addr -> [seconds]
+  const meta = new Map(); // addr -> {name, img, vol}
+  let checked = 0;
+  const bump = (map, k, n = 1) => map.set(k, (map.get(k) || 0) + n);
+
+  let done = 0;
+  await pool(markets, MARKET_CONCURRENCY, async ([cond, tts]) => {
+    const oldest = Math.min(...tts.map((t) => t.timestamp));
+    // page the market feed back past the oldest target trade (+ control margin)
+    const feed = [];
+    for (let p = 0; p < TRADES_MAX_PAGES; p++) {
+      if (state.cancelled) return;
+      const page = await fetchJson(
+        `${DATA}/trades?market=${cond}&limit=${TRADES_PAGE_SIZE}&offset=${p * TRADES_PAGE_SIZE}`
+      );
+      if (!Array.isArray(page) || page.length === 0) break;
+      feed.push(...page);
+      if (page[page.length - 1].timestamp < oldest - windowS - 60) break;
+      if (page.length < TRADES_PAGE_SIZE) break;
+    }
+    for (const t of tts) {
+      checked++;
+      const seenAfter = new Set();
+      const seenBefore = new Set();
+      for (const u of feed) {
+        const w = (u.proxyWallet || '').toLowerCase();
+        if (!w || w === target) continue;
+        // a copier mirrors the exact action: same outcome, same direction
+        if (u.side !== t.side || u.outcomeIndex !== t.outcomeIndex) continue;
+        const dt = u.timestamp - t.timestamp;
+        if (dt >= 0 && dt <= windowS) {
+          if (!seenAfter.has(w)) {
+            seenAfter.add(w);
+            if (!delays.has(w)) delays.set(w, []);
+            delays.get(w).push(dt);
+            const mt = meta.get(w) || { name: '', img: '', vol: 0 };
+            mt.vol += (u.size || 0) * (u.price || 0);
+            if (!mt.name && (u.name || u.pseudonym)) mt.name = u.name || u.pseudonym;
+            if (!mt.img && u.profileImage) mt.img = u.profileImage;
+            meta.set(w, mt);
+          }
+        } else if (dt < 0 && dt >= -windowS) {
+          seenBefore.add(w);
+        }
+      }
+      for (const w of seenAfter) {
+        bump(follows, w);
+        if (!fMarkets.has(w)) fMarkets.set(w, new Set());
+        fMarkets.get(w).add(cond);
+      }
+      for (const w of seenBefore) bump(before, w);
+    }
+    done++;
+    setStatus(`Checking who follows this wallet… ${done}/${markets.length} markets`, 5 + (done / markets.length) * 30);
+  });
+  if (state.cancelled) throw new Error('cancelled');
+
+  const median = (arr) => {
+    const s = [...arr].sort((a, b) => a - b);
+    return s.length ? s[Math.floor(s.length / 2)] : null;
+  };
+  state.copierStats = new Map();
+  let confident = 0;
+  for (const [w, n] of follows) {
+    if (n < COPIER_MIN_FOLLOWS) continue;
+    const b = before.get(w) || 0;
+    const mk = fMarkets.get(w).size;
+    const isConfident =
+      n >= COPIER_LIKELY.follows &&
+      n >= COPIER_LIKELY.ratio * b &&
+      (mk >= COPIER_LIKELY.markets || b === 0);
+    if (isConfident) confident++;
+    state.copierStats.set(w, {
+      follows: n,
+      before: b,
+      markets: fMarkets.get(w),
+      medDelay: median(delays.get(w) || []),
+      confident: isConfident,
+      ...meta.get(w),
+    });
+  }
+
+  const totalAfter = [...follows.values()].reduce((a, b) => a + b, 0);
+  const totalBefore = [...before.values()].reduce((a, b) => a + b, 0);
+  return {
+    title: `Copiers of ${shortAddr(target)}`,
+    isCopier: true,
+    target,
+    confident,
+    candidates: state.copierStats.size,
+    tradesChecked: checked,
+    marketsChecked: markets.length,
+    windowS,
+    asymmetry: totalBefore > 0 ? totalAfter / totalBefore : totalAfter > 0 ? Infinity : 0,
   };
 }
 
@@ -901,6 +1057,25 @@ async function runScan() {
       return;
     }
 
+    if (state.scanMode === 'copier') {
+      state.mode = 'copier';
+      const res = await loadCopierScan();
+      if (!res) throw new Error('Paste a wallet address (0x…) or a Polymarket profile link.');
+      if (res.empty) throw new Error('That wallet has no recent trades to analyse.');
+      state.event = res;
+      state.markets = [];
+      renderEvent();
+      if (state.copierStats.size === 0) {
+        hideStatus();
+        els.resultsCard.classList.add('hidden');
+        showError('No repeat followers found - nobody appears to be copying this wallet.');
+        return;
+      }
+      await rankAndFetchPnl();
+      els.rerankBtn.classList.remove('hidden');
+      return;
+    }
+
     // one event, a category's top events, a BTC time-frame series, or a random roll
     const isCat = state.scanMode === 'category';
     const isBtc = state.scanMode === 'btc';
@@ -973,6 +1148,22 @@ async function runScan() {
 }
 
 function aggregateWallets() {
+  if (state.scanMode === 'copier') {
+    // candidates come from the copier detection, not from market discovery
+    const agg = new Map();
+    for (const [addr, s] of state.copierStats) {
+      agg.set(addr, {
+        vol: s.vol || 0,
+        trades: s.follows,
+        shares: 0,
+        opp: 0,
+        markets: s.markets,
+        name: s.name || '',
+        img: s.img || '',
+      });
+    }
+    return agg;
+  }
   if (state.scanMode === 'csv') {
     // no market discovery - the user supplied the wallets
     const agg = new Map();
@@ -1197,6 +1388,12 @@ async function rankAndFetchPnl() {
       avgWin: win ? win.avgWinPct : null,
       plRatio: win ? win.plRatio : null,
       closedBets: win ? win.closedBets : null,
+      ...(state.scanMode === 'copier' && state.copierStats.has(w.addr)
+        ? (() => {
+            const s = state.copierStats.get(w.addr);
+            return { follows: s.follows, leadBefore: s.before, medDelay: s.medDelay, confident: s.confident };
+          })()
+        : {}),
     });
     progress();
   });
@@ -1223,6 +1420,16 @@ function renderEvent() {
   if (ev.isCsv) {
     els.eventIcon.classList.add('hidden');
     els.eventMeta.textContent = `${ev.walletCount.toLocaleString()} wallet${ev.walletCount === 1 ? '' : 's'} pasted`;
+    els.marketChips.innerHTML = '';
+    return;
+  }
+  if (ev.isCopier) {
+    els.eventIcon.classList.add('hidden');
+    const asym = ev.asymmetry === Infinity ? '∞' : ev.asymmetry.toFixed(1);
+    els.eventMeta.textContent =
+      `${ev.confident} likely copier${ev.confident === 1 ? '' : 's'} · ` +
+      `${ev.candidates} repeat follower${ev.candidates === 1 ? '' : 's'} · ` +
+      `${asym}× follow/lead ratio · ${ev.tradesChecked} trades across ${ev.marketsChecked} markets, ${ev.windowS}s window`;
     els.marketChips.innerHTML = '';
     return;
   }
@@ -1302,6 +1509,15 @@ function columnsForMode() {
     { key: 'ageDays', label: 'Age' },
   ];
   if (state.mode === 'csv') return common; // no event context to report
+  if (state.mode === 'copier') {
+    return [
+      { key: 'follows', label: 'Follows' },
+      { key: 'leadBefore', label: 'Before' },
+      { key: 'markets', label: 'Markets' },
+      { key: 'medDelay', label: 'Delay' },
+      ...common,
+    ];
+  }
   if (state.mode === 'holders') {
     return [...common,
       { key: 'arbPct', label: 'Hedged %' },
@@ -1324,8 +1540,11 @@ function columnsForMode() {
 }
 
 function renderResults() {
-  const key = state.sortKey;
   const cols = columnsForMode();
+  // copier scans are about who follows most, not PnL, so default to that
+  if (state.mode === 'copier' && !cols.some((c) => c.key === state.sortKey)) state.sortKey = 'follows';
+  else if (state.mode === 'copier' && state.sortKey === state.activeWindow) state.sortKey = 'follows';
+  const key = state.sortKey;
   if (!cols.some((c) => c.key === key)) state.sortKey = state.activeWindow; // mode switch reset
   const sortBy = state.sortKey;
 
@@ -1353,6 +1572,10 @@ function renderResults() {
           : `<td class="num ${r.plRatio < 1 ? 'neg' : ''}">${r.plRatio === Infinity ? '∞' : r.plRatio.toFixed(1) + '×'}</td>`;
       case 'views': return `<td class="num">${r.views == null ? '-' : fmtCount(r.views)}</td>`;
       case 'lifeTrades': return `<td class="num">${r.lifeTrades == null ? '-' : fmtCount(r.lifeTrades)}</td>`;
+      case 'follows':
+        return `<td class="num">${r.follows}${r.confident ? ' <span class="badge">copier</span>' : ''}</td>`;
+      case 'leadBefore': return `<td class="num ${r.leadBefore > 0 ? 'na' : ''}">${r.leadBefore}</td>`;
+      case 'medDelay': return `<td class="num">${r.medDelay == null ? '-' : r.medDelay + 's'}</td>`;
       case 'ageDays':
         return `<td class="num">${
           r.ageDays == null ? '-' : r.ageDays < 365 ? Math.round(r.ageDays) + 'd' : (r.ageDays / 365).toFixed(1) + 'y'
@@ -1589,8 +1812,10 @@ els.mainTabs.addEventListener('click', (e) => {
   els.panelBtc.classList.toggle('hidden', state.scanMode !== 'btc');
   els.panelGamble.classList.toggle('hidden', state.scanMode !== 'gamble');
   els.panelCsv.classList.toggle('hidden', state.scanMode !== 'csv');
-  // no discovery step in wallet-list mode, so its knobs do not apply
-  els.depth.closest('.option').classList.toggle('hidden', state.scanMode === 'csv');
+  els.panelCopier.classList.toggle('hidden', state.scanMode !== 'copier');
+  // no market discovery in these modes, so its knobs do not apply
+  const noDiscovery = state.scanMode === 'csv' || state.scanMode === 'copier';
+  els.depth.closest('.option').classList.toggle('hidden', noDiscovery);
   els.topN.closest('.option').classList.toggle('hidden', state.scanMode === 'csv');
   updateDepthAvailability();
 });

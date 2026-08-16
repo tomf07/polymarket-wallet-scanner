@@ -124,6 +124,27 @@ main {
 }
 #csv-text:focus { border-color: var(--accent); }
 .csv-row { display: flex; align-items: center; gap: 12px; margin-top: 10px; flex-wrap: wrap; }
+
+#copier-input {
+  flex: 1;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 12px 14px;
+  font-size: 0.95rem;
+  outline: none;
+}
+#copier-input:focus { border-color: var(--accent); }
+.copier-opts { flex-direction: row; gap: 18px; margin-top: 10px; flex-wrap: wrap; }
+.copier-opts select {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 0.85rem;
+}
 .file-btn {
   background: var(--bg-elev);
   border: 1px solid var(--border);
