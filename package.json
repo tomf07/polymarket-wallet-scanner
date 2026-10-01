@@ -1,0 +1,17 @@
+{
+  "name": "markyscan",
+  "version": "1.0.0",
+  "description": "Find the most profitable wallets in any Polymarket event or category - web app + CLI",
+  "license": "UNLICENSED",
+  "private": true,
+  "bin": {
+    "markyscan": "cli.js"
+  },
+  "files": [
+    "cli.js",
+    "core.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

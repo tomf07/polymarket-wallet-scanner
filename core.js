@@ -1,0 +1,1304 @@
+'use strict';
+
+/* ============================================================
+ * MarkyScan core - the scanning / ranking engine, shared by the
+ * web app (app.js) and the command line (cli.js). No DOM in here.
+ *
+ * Uses only Polymarket public APIs (all CORS-enabled):
+ *   gamma-api.polymarket.com     event/market metadata
+ *   data-api.polymarket.com      holders + trades per market
+ *   user-pnl-api.polymarket.com  per-wallet PnL time series
+ *   lb-api.polymarket.com        lifetime volume (ROI)
+ *
+ * Loads as a plain <script> (exposes window.MarkyCore) or as a
+ * CommonJS module (require('./core.js')).
+ * ============================================================ */
+
+(function (root) {
+  const GAMMA = 'https://gamma-api.polymarket.com';
+  const DATA = 'https://data-api.polymarket.com';
+  const PNL_API = 'https://user-pnl-api.polymarket.com';
+  const LB_API = 'https://lb-api.polymarket.com';
+
+  const TRADES_PAGE_SIZE = 500;
+  const TRADES_MAX_PAGES = 7; // the API rejects offsets past 3,000, so ~3,500 is the ceiling
+  const ACTIVITY_PAGE_SIZE = 500;
+  const ACTIVITY_MAX_PAGES = 4; // bulk scans: up to 2,000 recent activity events per wallet
+  const DEEP_ACTIVITY_MAX_PAGES = 60; // on-demand "full history": up to 30,000 events
+  const DEAD_POSITION_PCT = -99; // open position down ≥99% = scored as a loss (anti win-rate gaming)
+  const MARKET_CONCURRENCY = 5;
+  const PNL_CONCURRENCY = 8;
+
+  const CATEGORY_LABELS = {
+    sports: 'Sports', politics: 'Politics', crypto: 'Crypto', esports: 'Esports',
+    'pop-culture': 'Pop culture', business: 'Business', economy: 'Economy', tech: 'Tech',
+    science: 'Science', world: 'World', elections: 'Elections', geopolitics: 'Geopolitics',
+  };
+  const CAT_MARKETS_PER_EVENT = 12; // per event, keep category scans bounded (top by volume)
+  // volume windows the gamma API can rank events by (shorter windows don't
+  // exist there, so 1h/4h are measured live from each candidate's trade feed)
+  const CAT_WINDOWS = {
+    live1h: { label: '1h', liveHours: 1 },
+    live4h: { label: '4h', liveHours: 4 },
+    live6h: { label: '6h', liveHours: 6 },
+    live12h: { label: '12h', liveHours: 12 },
+    volume24hr: { label: '24h' },
+    volume1wk: { label: '7d' },
+    volume1mo: { label: '30d' },
+    volume1yr: { label: '1y' },
+    volume: { label: 'all-time' },
+  };
+  const LIVE_MARKETS_MEASURED = 4; // top markets per event used for the measurement
+  const LIVE_MAX_EVENTS_CHECKED = 300; // safety cap on the candidate walk
+  const LIVE_CHUNK = 20; // measure candidates in chunks, checking the stop bound between them
+
+  const MAX_BTC_MARKETS = 300; // hard cap per BTC time-frame scan
+  const SLUG_BATCH = 20; // gamma /events accepts repeated slug params - batch lookups
+
+  /** ET calendar parts for a unix ts (BTC hourly/daily slugs are ET-based). */
+  function etParts(ts) {
+    const fmt = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York',
+      month: 'long', day: 'numeric', year: 'numeric', hour: 'numeric', hour12: true,
+    });
+    const p = Object.fromEntries(fmt.formatToParts(new Date(ts * 1000)).map((x) => [x.type, x.value]));
+    return { month: p.month.toLowerCase(), day: p.day, year: p.year, hour: p.hour, ap: p.dayPeriod.toLowerCase() };
+  }
+
+  const BTC_TIMEFRAMES = {
+    '5m': { step: 300, label: '5-minute', slug: (ts) => `btc-updown-5m-${ts}` },
+    '15m': { step: 900, label: '15-minute', slug: (ts) => `btc-updown-15m-${ts}` },
+    '1h': {
+      step: 3600, label: 'hourly',
+      slug: (ts) => { const e = etParts(ts); return `bitcoin-up-or-down-${e.month}-${e.day}-${e.year}-${e.hour}${e.ap}-et`; },
+    },
+    '4h': { step: 14400, label: '4-hour', slug: (ts) => `btc-updown-4h-${ts}` },
+    '1d': {
+      step: 86400, label: 'daily',
+      slug: (ts) => { const e = etParts(ts); return `bitcoin-up-or-down-on-${e.month}-${e.day}-${e.year}`; },
+    },
+  };
+
+  const COPIER_MAX_MARKETS = 10; // distinct markets of the target to examine
+  const COPIER_MIN_FOLLOWS = 2; // candidates below this are coincidence, not copying
+  // A "likely copier" follows repeatedly, rarely leads, and shows one of the two
+  // strong patterns: following across several markets (they track the wallet,
+  // not the market), or never once trading ahead of it.
+  const COPIER_LIKELY = { follows: 3, markets: 2, ratio: 2 };
+
+  // wallet-type presets just fill the win-metric thresholds
+  const WALLET_PRESETS = {
+    longshot: { minAvgWin: 500 },
+    grinder: { minWinRate: 70, minRoi: 0 },
+    roi: { minRoi: 30 },
+  };
+
+  /* ---------------- pure helpers ---------------- */
+
+  /** Pull unique wallet addresses out of arbitrary text (CSV, one per line,
+   *  comma separated…). Column layout and headers are irrelevant. */
+  function parseAddresses(text) {
+    const found = String(text || '').match(/0x[a-fA-F0-9]{40}/g) || [];
+    return [...new Set(found.map((a) => a.toLowerCase()))];
+  }
+
+  function parseInput(text) {
+    const t = text.trim();
+    if (!t) return null;
+
+    // bare slug
+    if (!t.includes('/') && /^[a-z0-9_-]+$/i.test(t)) return { type: 'auto', slug: t };
+
+    // any polymarket.com URL: /event/<slug>, /market/<slug>, /<locale>/event/<slug>,
+    // /sports/<league>/<slug>, /pt/sports/world-cup/<slug>, etc.
+    let path;
+    try {
+      const url = new URL(t.startsWith('http') ? t : 'https://' + t);
+      if (!/polymarket\.com$/i.test(url.hostname)) return null;
+      path = url.pathname;
+    } catch (_) {
+      return null;
+    }
+    const segments = path.split('/').filter(Boolean);
+    if (segments.length === 0) return null;
+
+    const isMarket = segments.includes('market');
+    const slug = segments[segments.length - 1]; // slug is always the last segment
+    if (!/^[a-z0-9_-]+$/i.test(slug)) return null;
+    return { type: isMarket ? 'market' : 'auto', slug };
+  }
+
+  function fmtUsd(n) {
+    if (n == null || Number.isNaN(n)) return '-';
+    const abs = Math.abs(n);
+    const s =
+      abs >= 1e6 ? (abs / 1e6).toFixed(2) + 'M' :
+      abs >= 1e3 ? (abs / 1e3).toFixed(1) + 'K' :
+      abs.toFixed(abs < 10 ? 2 : 0);
+    return (n < 0 ? '-$' : '$') + s;
+  }
+
+  function shortAddr(a) {
+    return a.slice(0, 6) + '…' + a.slice(-4);
+  }
+
+  function fmtCount(n) {
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+    return String(n);
+  }
+
+  /** "Trade scan depth" setting → how wallets are discovered.
+   *  '1' | '2' | '4' = trade pages per market, 'hybrid' = Max, 'holders'. */
+  function depthMode(depth) {
+    const mode = depth === 'holders' ? 'holders' : depth === 'hybrid' ? 'hybrid' : 'trades';
+    const tradePages =
+      mode === 'holders' ? 0 : mode === 'hybrid' ? TRADES_MAX_PAGES : parseInt(depth, 10) || 2;
+    return { mode, tradePages };
+  }
+
+  /** Event object → the flat market list every scan works on. */
+  function marketsFromEvent(event) {
+    return (event.markets || [])
+      .filter((m) => m.conditionId)
+      .map((m) => ({
+        conditionId: m.conditionId,
+        question: m.question || m.groupItemTitle || 'Market',
+        closed: !!m.closed,
+        selected: true,
+        evTitle: m.evTitle || '',
+      }));
+  }
+
+  /** A threshold implies win metrics even when they weren't asked for. */
+  function normalizeFilters(f) {
+    const out = {
+      maxViews: null,
+      exRed: { d7: false, d30: false, all: false },
+      bounds: { d7: {}, d30: {}, all: {} },
+      maxArb: null, minTrades: null, maxTrades: null, minAge: null, maxAge: null,
+      minRoi: null, minWinRate: null, minAvgWin: null, minPlRatio: null,
+      winMetrics: false,
+      ...f,
+    };
+    for (const k of ['d7', 'd30', 'all']) {
+      out.bounds[k] = { min: null, max: null, ...(out.bounds[k] || {}) };
+    }
+    out.winMetricsOn =
+      !!out.winMetrics || out.minRoi != null || out.minWinRate != null || out.minAvgWin != null || out.minPlRatio != null;
+    return out;
+  }
+
+  /** Does this wallet's PnL pass the red-exclusions and min/max bounds?
+   *  Windows with an active rule require a known (non-null) PnL. */
+  function pnlPasses(pnl, f) {
+    for (const k of ['d7', 'd30', 'all']) {
+      const v = pnl[k];
+      const { min, max } = f.bounds[k];
+      if (f.exRed[k] && (v == null || v < 0)) return false;
+      if (min != null && (v == null || v < min)) return false;
+      if (max != null && (v == null || v > max)) return false;
+    }
+    return true;
+  }
+
+  /** Merge per-market wallet maps (or a wallet list / copier result) into one
+   *  candidate map. mode: 'trades' | 'holders' | 'hybrid' | 'csv' | 'copier'. */
+  function aggregateWallets({ mode, markets = [], marketWallets = new Map(), csvAddrs = [], copierStats = new Map() }) {
+    if (mode === 'copier') {
+      // candidates come from the copier detection, not from market discovery
+      const agg = new Map();
+      for (const [addr, s] of copierStats) {
+        agg.set(addr, {
+          vol: s.vol || 0,
+          trades: s.follows,
+          shares: 0,
+          opp: 0,
+          markets: s.markets,
+          name: s.name || '',
+          img: s.img || '',
+        });
+      }
+      return agg;
+    }
+    if (mode === 'csv') {
+      // no market discovery - the user supplied the wallets
+      const agg = new Map();
+      for (const addr of csvAddrs) {
+        agg.set(addr, { vol: 0, trades: 0, shares: 0, opp: 0, markets: new Set(), name: '', img: '' });
+      }
+      return agg;
+    }
+    const agg = new Map(); // addr -> {vol, trades, markets:Set, name, img}
+    for (const m of markets) {
+      if (!m.selected) continue;
+      const wallets = marketWallets.get(m.conditionId);
+      if (!wallets) continue;
+      for (const [addr, w] of wallets) {
+        let a = agg.get(addr);
+        if (!a) {
+          a = { vol: 0, trades: 0, shares: 0, opp: 0, markets: new Set(), name: '', img: '' };
+          agg.set(addr, a);
+        }
+        a.vol += w.vol;
+        a.trades += w.trades;
+        a.shares += w.shares;
+        // hedged pairs in this market: each pos/neg pair = 2 opposite-side trades
+        a.opp += 2 * Math.min(w.pos, w.neg);
+        a.markets.add(m.conditionId);
+        if (w.name && !a.name) a.name = w.name;
+        if (w.img && !a.img) a.img = w.img;
+      }
+    }
+    return agg;
+  }
+
+  /** Closed bets worth showing for one trader: biggest wins + worst losses,
+   *  by % return (longshot view) or by $ profit. */
+  function pickBets(win, byDollar, nWins = 10, nLosses = 5) {
+    const bets = (win && win.bets) || [];
+    const wins = bets
+      .filter((b) => b.retPct > 0)
+      .sort((x, y) => (byDollar ? y.profit - x.profit : y.retPct - x.retPct))
+      .slice(0, nWins);
+    const losses = bets
+      .filter((b) => b.retPct <= 0)
+      .sort((x, y) => (byDollar ? x.profit - y.profit : x.retPct - y.retPct))
+      .slice(0, nLosses);
+    return { wins, losses };
+  }
+
+  /** Result rows → CSV text (same columns the web export has always used). */
+  function rowsToCsv(rows, sortKey) {
+    const sorted = [...rows].sort((a, b) => (b[sortKey] ?? -Infinity) - (a[sortKey] ?? -Infinity));
+    const lines = [
+      'rank,address,name,pnl_7d,pnl_30d,pnl_all_time,roi_pct,win_rate_pct,avg_win_pct,gain_loss_ratio,closed_bets,profile_views,lifetime_trades,wallet_age_days,arb_pct,volume_in_event,trades_in_event,shares_held,markets_in_event,profile_url',
+      ...sorted.map((r, i) =>
+        [
+          i + 1,
+          r.addr,
+          `"${(r.name || '').replace(/"/g, '""')}"`,
+          r.d7 ?? '',
+          r.d30 ?? '',
+          r.all ?? '',
+          r.roi == null ? '' : r.roi.toFixed(1),
+          r.winRate == null ? '' : r.winRate.toFixed(1),
+          r.avgWin == null ? '' : r.avgWin.toFixed(1),
+          r.plRatio == null ? '' : r.plRatio === Infinity ? 'inf' : r.plRatio.toFixed(2),
+          r.closedBets ?? '',
+          r.views ?? '',
+          r.lifeTrades ?? '',
+          r.ageDays == null ? '' : Math.round(r.ageDays),
+          r.arbPct == null ? '' : r.arbPct.toFixed(1),
+          r.vol.toFixed(2),
+          r.trades,
+          Math.round(r.shares),
+          r.markets,
+          `https://polymarket.com/profile/${r.addr}`,
+        ].join(',')
+      ),
+    ];
+    return lines.join('\n');
+  }
+
+  const evKey = (a) =>
+    `${a.type}|${a.transactionHash || ''}|${a.asset || ''}|${a.conditionId}|${a.timestamp}|${a.size}`;
+
+  async function sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  /* ---------------- scanner (network + caches) ---------------- */
+
+  /** One scanner = one set of caches + one cancel flag. Progress goes to
+   *  onStatus(text, pct) - the web app drives its progress bar with it, the
+   *  CLI prints it to stderr. */
+  function createScanner({ onStatus = () => {}, fetchImpl } = {}) {
+    const doFetch = fetchImpl || ((...a) => fetch(...a));
+    const st = {
+      cancelled: false,
+      pnlCache: new Map(), // addr -> {d7, d30, all} (numbers or null)
+      statsCache: new Map(), // addr -> {views, trades, joinDate} or null
+      hedgeCache: new Map(), // addr -> hedged-shares % (number) or null
+      winCache: new Map(), // addr -> {volume, closedBets, winRate, avgWinPct} or null fields
+    };
+    const setStatus = (text, pct) => onStatus(text, pct);
+
+    async function fetchJson(url, tries = 3) {
+      for (let i = 0; i < tries; i++) {
+        if (st.cancelled) throw new Error('cancelled');
+        try {
+          const resp = await doFetch(url);
+          if (resp.status === 429 || resp.status >= 500) {
+            await sleep(800 * (i + 1) + Math.random() * 400);
+            continue;
+          }
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          return await resp.json();
+        } catch (e) {
+          if (e.message === 'cancelled') throw e;
+          if (i === tries - 1) return null;
+          await sleep(500 * (i + 1));
+        }
+      }
+      return null;
+    }
+
+    /** Run tasks with limited concurrency. */
+    async function pool(items, limit, worker) {
+      const queue = [...items.entries()];
+      const runners = Array.from({ length: Math.min(limit, queue.length) }, async () => {
+        while (queue.length) {
+          if (st.cancelled) return;
+          const [idx, item] = queue.shift();
+          await worker(item, idx);
+        }
+      });
+      await Promise.all(runners);
+    }
+
+    /* ---------------- data loading ---------------- */
+
+    async function eventBySlug(slug) {
+      const arr = await fetchJson(`${GAMMA}/events?slug=${encodeURIComponent(slug)}`);
+      return arr && arr[0] ? arr[0] : null;
+    }
+
+    async function loadEvent(parsed) {
+      let event = null;
+
+      if (parsed.type !== 'market') {
+        event = await eventBySlug(parsed.slug);
+      }
+      if (!event) {
+        // market link (or slug that isn't an event) → find its parent event so we
+        // also grab sibling markets for the same game
+        const arr = await fetchJson(`${GAMMA}/markets?slug=${encodeURIComponent(parsed.slug)}`);
+        const market = arr && arr[0] ? arr[0] : null;
+        if (market) {
+          const parent = Array.isArray(market.events) && market.events[0];
+          if (parent) {
+            const evArr = await fetchJson(`${GAMMA}/events?id=${parent.id}`);
+            if (evArr && evArr[0] && Array.isArray(evArr[0].markets)) event = evArr[0];
+          }
+          if (!event) {
+            event = { title: market.question, icon: market.icon, slug: parsed.slug, markets: [market], volume: market.volumeNum };
+          }
+        }
+      }
+      if (!event) return null;
+
+      // Sports games split props into a sibling "<slug>-more-markets" event
+      // (spreads, over/under, both-teams-to-score, corners, etc.) - merge them in.
+      const slug = event.slug || parsed.slug;
+      const siblingSlug = slug.endsWith('-more-markets')
+        ? slug.replace(/-more-markets$/, '')
+        : slug + '-more-markets';
+      event.scanEventIds = [event.id].filter(Boolean);
+      const sibling = await eventBySlug(siblingSlug);
+      if (sibling && Array.isArray(sibling.markets)) {
+        // main game event first (title/icon), props appended after
+        const primary = slug.endsWith('-more-markets') ? sibling : event;
+        const secondary = primary === event ? sibling : event;
+        const seen = new Set();
+        const merged = [];
+        for (const m of [...(primary.markets || []), ...(secondary.markets || [])]) {
+          if (m.conditionId && !seen.has(m.conditionId)) {
+            seen.add(m.conditionId);
+            merged.push(m);
+          }
+        }
+        event = { ...primary, markets: merged, scanEventIds: [primary.id, secondary.id].filter(Boolean) };
+      }
+      return event;
+    }
+
+    /** Category mode: pull the category's top open events (by 24h volume) and
+     *  flatten their highest-volume markets into one event-shaped scan target. */
+    async function loadCategoryEvent({ category = 'sports', events = 10, window = 'volume24hr' } = {}) {
+      const slug = category;
+      const label = CATEGORY_LABELS[slug] || slug;
+      const nEv = Math.min(30, Math.max(1, parseInt(events, 10) || 10));
+      const windowKey = CAT_WINDOWS[window] ? window : 'volume24hr';
+      const wDef = CAT_WINDOWS[windowKey];
+
+      let evs;
+      let liveTotal = 0;
+      if (wDef.liveHours) {
+        // live window: walk the category's events in 24h-volume order, measuring
+        // each one's actual traded volume inside the window. Since window volume
+        // can never exceed 24h volume, we stop as soon as the next candidate's
+        // 24h volume is below our Nth-best measured window volume - at that point
+        // the top N is provably complete.
+        const cutoff = Date.now() / 1000 - wDef.liveHours * 3600;
+        const measured = [];
+        let offset = 0;
+        let stop = false;
+        let checked = 0;
+        while (!stop && offset < LIVE_MAX_EVENTS_CHECKED) {
+          const page = await fetchJson(
+            `${GAMMA}/events?tag_slug=${encodeURIComponent(slug)}&closed=false&order=volume24hr&ascending=false&limit=100&offset=${offset}`
+          );
+          if (!Array.isArray(page) || page.length === 0) break;
+          offset += page.length;
+          const cands = page.filter((e) => Array.isArray(e.markets) && e.markets.some((m) => m.conditionId));
+          for (let i = 0; i < cands.length && !stop; i += LIVE_CHUNK) {
+            const chunk = cands.slice(i, i + LIVE_CHUNK);
+            await pool(chunk, MARKET_CONCURRENCY, async (ev) => {
+              ev._liveVol = await measureEventWindow(ev, cutoff);
+              checked++;
+              setStatus(`Measuring ${wDef.label} volume… ${checked} events checked`, 2 + Math.min(4, checked / 25));
+            });
+            if (st.cancelled) throw new Error('cancelled');
+            measured.push(...chunk);
+            const nth = measured.map((e) => e._liveVol || 0).sort((a, b) => b - a)[nEv - 1] || 0;
+            const next = cands[i + LIVE_CHUNK];
+            if (nth > 0 && next && (Number(next.volume24hr) || 0) < nth) stop = true;
+          }
+          if (page.length < 100) break;
+        }
+        evs = measured
+          .filter((e) => (e._liveVol || 0) > 0)
+          .sort((a, b) => b._liveVol - a._liveVol)
+          .slice(0, nEv);
+        if (evs.length === 0) return null;
+        liveTotal = evs.reduce((s, e) => s + e._liveVol, 0);
+      } else {
+        evs = await fetchJson(
+          `${GAMMA}/events?tag_slug=${encodeURIComponent(slug)}&closed=false&order=${windowKey}&ascending=false&limit=${nEv}`
+        );
+      }
+      if (!Array.isArray(evs) || evs.length === 0) return null;
+
+      const markets = [];
+      for (const ev of evs) {
+        const ms = (ev.markets || [])
+          .filter((m) => m.conditionId)
+          .sort((a, b) => (b.volumeNum || 0) - (a.volumeNum || 0))
+          .slice(0, CAT_MARKETS_PER_EVENT);
+        for (const m of ms) markets.push({ ...m, evTitle: ev.title || 'Event' });
+      }
+      return {
+        title: `Top wallets - ${label}`,
+        icon: evs[0].icon || evs[0].image,
+        volume24h: wDef.liveHours ? liveTotal : evs.reduce((s, e) => s + (Number(e[windowKey]) || 0), 0),
+        volLabel: wDef.label,
+        scanEventIds: evs.map((e) => e.id).filter(Boolean),
+        markets,
+        isCategory: true,
+        eventCount: evs.length,
+      };
+    }
+
+    /** BTC mode: enumerate every Bitcoin Up/Down market of one time-frame in the
+     *  lookback window (slugs are deterministic - timestamps or ET dates), resolve
+     *  them in batched gamma lookups, and flatten into one scan target. */
+    async function loadBtcEvent({ tf: tfKey = '5m', hours: hoursIn = 24 } = {}) {
+      const tf = BTC_TIMEFRAMES[tfKey] || BTC_TIMEFRAMES['5m'];
+      const hours = Math.min(720, Math.max(1, parseInt(hoursIn, 10) || 24));
+      const now = Math.floor(Date.now() / 1000);
+
+      // period starts, newest (current, still-trading) first
+      const slugs = [];
+      const seen = new Set();
+      let ts = Math.floor(now / tf.step) * tf.step;
+      const oldest = now - hours * 3600;
+      while (ts >= oldest - (tf.step === 86400 ? 86400 : 0) && slugs.length < MAX_BTC_MARKETS) {
+        const s = tf.slug(ts);
+        if (!seen.has(s)) { seen.add(s); slugs.push(s); }
+        ts -= tf.step;
+      }
+
+      const events = [];
+      const chunks = [];
+      for (let i = 0; i < slugs.length; i += SLUG_BATCH) chunks.push(slugs.slice(i, i + SLUG_BATCH));
+      let done = 0;
+      await pool(chunks, 5, async (chunk) => {
+        const qs = chunk.map((s) => `slug=${encodeURIComponent(s)}`).join('&');
+        const arr = await fetchJson(`${GAMMA}/events?limit=${SLUG_BATCH}&${qs}`);
+        if (Array.isArray(arr)) events.push(...arr);
+        done++;
+        setStatus(`Resolving ${tf.label} BTC markets… ${Math.min(done * SLUG_BATCH, slugs.length)}/${slugs.length}`, 2 + (done / chunks.length) * 3);
+      });
+      if (events.length === 0) return null;
+
+      const markets = [];
+      for (const ev of events) {
+        for (const m of ev.markets || []) {
+          if (!m.conditionId) continue;
+          // "Bitcoin Up or Down - July 8, 8:05PM-8:10PM ET" → keep the time part
+          const short = (ev.title || '').split(' - ')[1] || ev.title || 'Market';
+          markets.push({ ...m, evTitle: short });
+        }
+      }
+      return {
+        title: `BTC Up or Down - ${tf.label} markets, last ${hours}h`,
+        icon: events[0].icon || events[0].image,
+        volume24h: events.reduce((s, e) => s + (Number(e.volume) || 0), 0),
+        scanEventIds: [], // too many events for per-event position lookups (holders arb check inert)
+        markets,
+        isCategory: true, // reuse category-style meta/chips rendering
+        isBtc: true,
+        eventCount: events.length,
+      };
+    }
+
+    /* ---------------- copier detection ---------------- */
+
+    /** Recent TRADE events for one wallet (newest first). */
+    async function recentWalletTrades(addr, pages = 2) {
+      const out = [];
+      let cursor = null;
+      for (let p = 0; p < pages; p++) {
+        if (st.cancelled) break;
+        const page = await fetchJson(
+          `${DATA}/activity?user=${addr}&limit=${ACTIVITY_PAGE_SIZE}` + (cursor != null ? `&end=${cursor}` : '')
+        );
+        if (!Array.isArray(page) || page.length === 0) break;
+        out.push(...page);
+        if (page.length < ACTIVITY_PAGE_SIZE) break;
+        const oldest = page[page.length - 1].timestamp;
+        cursor = oldest === cursor ? oldest - 1 : oldest;
+      }
+      return out.filter((a) => a.type === 'TRADE' && a.conditionId);
+    }
+
+    /** Copier scan: find wallets that mirror the target's trades within `window`
+     *  seconds. Trades in the equally-long window BEFORE each target trade are the
+     *  control - a real copier acts only after, while a wallet that simply trades
+     *  the same busy market appears just as often before, so it is discounted.
+     *  Returns null when no address was given; `stats` holds the per-wallet
+     *  follow counts the ranking step needs. */
+    async function loadCopierScan({ wallet, windowS: windowIn = 5, maxTrades: maxIn = 40 } = {}) {
+      const m = String(wallet || '').trim().match(/0x[a-fA-F0-9]{40}/);
+      if (!m) return null;
+      const target = m[0].toLowerCase();
+      const windowS = parseInt(windowIn, 10) || 5;
+      const maxTrades = parseInt(maxIn, 10) || 40;
+
+      setStatus('Loading the wallet’s recent trades…', 4);
+      const trades = (await recentWalletTrades(target)).slice(0, maxTrades);
+      if (trades.length === 0) return { empty: true, target, stats: new Map() };
+
+      // group the target's trades by market, newest markets first
+      const byMarket = new Map();
+      for (const t of trades) {
+        if (!byMarket.has(t.conditionId)) byMarket.set(t.conditionId, []);
+        byMarket.get(t.conditionId).push(t);
+      }
+      const markets = [...byMarket.entries()].slice(0, COPIER_MAX_MARKETS);
+
+      const follows = new Map(); // addr -> count of target trades followed
+      const before = new Map(); // addr -> count in the control window
+      const fMarkets = new Map(); // addr -> Set(conditionId)
+      const delays = new Map(); // addr -> [seconds]
+      const meta = new Map(); // addr -> {name, img, vol}
+      let checked = 0;
+      const bump = (map, k, n = 1) => map.set(k, (map.get(k) || 0) + n);
+
+      let done = 0;
+      await pool(markets, MARKET_CONCURRENCY, async ([cond, tts]) => {
+        const oldest = Math.min(...tts.map((t) => t.timestamp));
+        // page the market feed back past the oldest target trade (+ control margin)
+        const feed = [];
+        for (let p = 0; p < TRADES_MAX_PAGES; p++) {
+          if (st.cancelled) return;
+          const page = await fetchJson(
+            `${DATA}/trades?market=${cond}&limit=${TRADES_PAGE_SIZE}&offset=${p * TRADES_PAGE_SIZE}`
+          );
+          if (!Array.isArray(page) || page.length === 0) break;
+          feed.push(...page);
+          if (page[page.length - 1].timestamp < oldest - windowS - 60) break;
+          if (page.length < TRADES_PAGE_SIZE) break;
+        }
+        for (const t of tts) {
+          checked++;
+          const seenAfter = new Set();
+          const seenBefore = new Set();
+          for (const u of feed) {
+            const w = (u.proxyWallet || '').toLowerCase();
+            if (!w || w === target) continue;
+            // a copier mirrors the exact action: same outcome, same direction
+            if (u.side !== t.side || u.outcomeIndex !== t.outcomeIndex) continue;
+            const dt = u.timestamp - t.timestamp;
+            if (dt >= 0 && dt <= windowS) {
+              if (!seenAfter.has(w)) {
+                seenAfter.add(w);
+                if (!delays.has(w)) delays.set(w, []);
+                delays.get(w).push(dt);
+                const mt = meta.get(w) || { name: '', img: '', vol: 0 };
+                mt.vol += (u.size || 0) * (u.price || 0);
+                if (!mt.name && (u.name || u.pseudonym)) mt.name = u.name || u.pseudonym;
+                if (!mt.img && u.profileImage) mt.img = u.profileImage;
+                meta.set(w, mt);
+              }
+            } else if (dt < 0 && dt >= -windowS) {
+              seenBefore.add(w);
+            }
+          }
+          for (const w of seenAfter) {
+            bump(follows, w);
+            if (!fMarkets.has(w)) fMarkets.set(w, new Set());
+            fMarkets.get(w).add(cond);
+          }
+          for (const w of seenBefore) bump(before, w);
+        }
+        done++;
+        setStatus(`Checking who follows this wallet… ${done}/${markets.length} markets`, 5 + (done / markets.length) * 30);
+      });
+      if (st.cancelled) throw new Error('cancelled');
+
+      const median = (arr) => {
+        const s = [...arr].sort((a, b) => a - b);
+        return s.length ? s[Math.floor(s.length / 2)] : null;
+      };
+      const stats = new Map();
+      let confident = 0;
+      for (const [w, n] of follows) {
+        if (n < COPIER_MIN_FOLLOWS) continue;
+        const b = before.get(w) || 0;
+        const mk = fMarkets.get(w).size;
+        const isConfident =
+          n >= COPIER_LIKELY.follows &&
+          n >= COPIER_LIKELY.ratio * b &&
+          (mk >= COPIER_LIKELY.markets || b === 0);
+        if (isConfident) confident++;
+        stats.set(w, {
+          follows: n,
+          before: b,
+          markets: fMarkets.get(w),
+          medDelay: median(delays.get(w) || []),
+          confident: isConfident,
+          ...meta.get(w),
+        });
+      }
+
+      const totalAfter = [...follows.values()].reduce((a, b) => a + b, 0);
+      const totalBefore = [...before.values()].reduce((a, b) => a + b, 0);
+      return {
+        title: `Copiers of ${shortAddr(target)}`,
+        isCopier: true,
+        target,
+        confident,
+        candidates: stats.size,
+        tradesChecked: checked,
+        marketsChecked: markets.length,
+        windowS,
+        asymmetry: totalBefore > 0 ? totalAfter / totalBefore : totalAfter > 0 ? Infinity : 0,
+        stats,
+      };
+    }
+
+    /** Traded USD volume inside [cutoff, now] for one event, measured from its
+     *  top markets' trade feeds. Pages each market until the feed reaches back
+     *  past the cutoff, so the window is fully covered (up to the API's ceiling). */
+    async function measureEventWindow(ev, cutoff) {
+      let v = 0;
+      const top = (ev.markets || [])
+        .filter((m) => m.conditionId)
+        .sort((a, b) => (b.volumeNum || 0) - (a.volumeNum || 0))
+        .slice(0, LIVE_MARKETS_MEASURED);
+      for (const m of top) {
+        for (let page = 0; page < TRADES_MAX_PAGES; page++) {
+          if (st.cancelled) return v;
+          const trades = await fetchJson(
+            `${DATA}/trades?market=${m.conditionId}&limit=${TRADES_PAGE_SIZE}&offset=${page * TRADES_PAGE_SIZE}`
+          );
+          if (!Array.isArray(trades) || trades.length === 0) break;
+          let pastCutoff = false;
+          for (const t of trades) {
+            if ((t.timestamp || 0) >= cutoff) v += (t.size || 0) * (t.price || 0);
+            else pastCutoff = true;
+          }
+          if (pastCutoff || trades.length < TRADES_PAGE_SIZE) break;
+        }
+      }
+      return v;
+    }
+
+    /** Gambling mode: roll a random topic, then a random active event in it, then
+     *  one random market from that event. Filters apply like any other scan.
+     *  Degen rolls skip a topic's top 100 by volume and dig in the graveyard
+     *  below - retrying a few topics since small ones may not go that deep. */
+    async function loadGambleEvent({ degen = false } = {}) {
+      const tags = Object.keys(CATEGORY_LABELS);
+      const attempts = degen ? 4 : 1;
+      for (let i = 0; i < attempts; i++) {
+        const tag = tags[Math.floor(Math.random() * tags.length)];
+        const offset = degen ? 100 + Math.floor(Math.random() * 7) * 50 : 0; // 100..400
+        const evs = await fetchJson(
+          `${GAMMA}/events?tag_slug=${encodeURIComponent(tag)}&closed=false&order=volume24hr&ascending=false&limit=${degen ? 50 : 100}&offset=${offset}`
+        );
+        if (!Array.isArray(evs)) continue;
+        const pool = evs.filter((e) => Array.isArray(e.markets) && e.markets.some((m) => m.conditionId));
+        if (pool.length === 0) continue;
+        const ev = pool[Math.floor(Math.random() * pool.length)];
+        const ms = ev.markets.filter((m) => m.conditionId);
+        const market = ms[Math.floor(Math.random() * ms.length)];
+        return {
+          title: ev.title || 'Event',
+          icon: ev.icon || ev.image,
+          volume: ev.volume,
+          scanEventIds: [ev.id].filter(Boolean),
+          markets: [market],
+          gambleTag: CATEGORY_LABELS[tag] || tag,
+          degen,
+        };
+      }
+      return null;
+    }
+
+    /** Collect wallets active in one market.
+     *  mode 'trades'  → recent trade history (paginated), tracks buy/sell stance
+     *                   per outcome so we can detect arb/hedge behavior.
+     *  mode 'holders' → top current holders of each outcome token. */
+    async function scanMarket(market, tradePages, mode) {
+      const wallets = new Map();
+      const touch = (addr, patch) => {
+        let w = wallets.get(addr);
+        if (!w) {
+          w = { vol: 0, trades: 0, shares: 0, pos: 0, neg: 0, name: '', img: '' };
+          wallets.set(addr, w);
+        }
+        if (patch.vol) w.vol += patch.vol;
+        if (patch.trades) w.trades += patch.trades;
+        if (patch.shares) w.shares += patch.shares;
+        if (patch.pos) w.pos += patch.pos;
+        if (patch.neg) w.neg += patch.neg;
+        if (patch.name && !w.name) w.name = patch.name;
+        if (patch.img && !w.img) w.img = patch.img;
+      };
+
+      if (mode === 'holders' || mode === 'hybrid') {
+        const holders = await fetchJson(`${DATA}/holders?market=${market.conditionId}&limit=100`);
+        if (Array.isArray(holders)) {
+          for (const tokenGroup of holders) {
+            for (const h of tokenGroup.holders || []) {
+              if (!h.proxyWallet) continue;
+              touch(h.proxyWallet.toLowerCase(), {
+                shares: h.amount || 0,
+                name: h.name || h.pseudonym,
+                img: h.profileImage,
+              });
+            }
+          }
+        }
+        if (mode === 'holders') return wallets;
+      }
+
+      for (let page = 0; page < Math.min(tradePages, TRADES_MAX_PAGES); page++) {
+        if (st.cancelled) break;
+        const trades = await fetchJson(
+          `${DATA}/trades?market=${market.conditionId}&limit=${TRADES_PAGE_SIZE}&offset=${page * TRADES_PAGE_SIZE}`
+        );
+        if (!Array.isArray(trades) || trades.length === 0) break;
+        for (const t of trades) {
+          if (!t.proxyWallet) continue;
+          // stance: buying outcome 0 ≡ selling outcome 1 → sign +1 / -1.
+          // A wallet trading both signs in the same market is hedging/arbing
+          // (e.g. Over AND Under 2.5, crypto Up AND Down).
+          const sign =
+            typeof t.outcomeIndex === 'number'
+              ? (t.outcomeIndex === 0 ? 1 : -1) * (t.side === 'BUY' ? 1 : -1)
+              : 0;
+          touch(t.proxyWallet.toLowerCase(), {
+            vol: (t.size || 0) * (t.price || 0),
+            trades: 1,
+            pos: sign > 0 ? 1 : 0,
+            neg: sign < 0 ? 1 : 0,
+            name: t.name || t.pseudonym,
+            img: t.profileImage,
+          });
+        }
+        if (trades.length < TRADES_PAGE_SIZE) break;
+      }
+
+      return wallets;
+    }
+
+    /** Scan every market for wallets → conditionId -> Map(addr -> stats). */
+    async function scanMarkets(markets, depth) {
+      const { mode, tradePages } = depthMode(depth);
+      const marketWallets = new Map();
+      let done = 0;
+      await pool(markets, MARKET_CONCURRENCY, async (m) => {
+        const wallets = await scanMarket(m, tradePages, mode);
+        marketWallets.set(m.conditionId, wallets);
+        done++;
+        setStatus(
+          `Scanning markets… ${done}/${markets.length}  (${m.question.slice(0, 60)})`,
+          5 + (done / markets.length) * 35
+        );
+      });
+      if (st.cancelled) throw new Error('cancelled');
+      return { mode, marketWallets };
+    }
+
+    /** Fetch a wallet's profile stats (views, trades, join date). */
+    async function fetchWalletStats(addr) {
+      if (st.statsCache.has(addr)) return st.statsCache.get(addr);
+      const data = await fetchJson(`${DATA}/v1/user-stats?proxyAddress=${addr}`);
+      const stats = data && typeof data.views === 'number' ? data : null;
+      st.statsCache.set(addr, stats);
+      return stats;
+    }
+
+    /** Holders mode: % of the wallet's shares in this event that are hedged,
+     *  i.e. it holds BOTH outcomes of the same market (Over+Under, Up+Down…).
+     *  Reads the wallet's own positions, so it isn't limited to top-100 lists. */
+    async function fetchWalletHedgePct(addr, eventIds = []) {
+      if (st.hedgeCache.has(addr)) return st.hedgeCache.get(addr);
+
+      const positions = [];
+      for (const id of eventIds) {
+        const arr = await fetchJson(`${DATA}/positions?user=${addr}&eventId=${id}&limit=500`);
+        if (Array.isArray(arr)) positions.push(...arr);
+      }
+
+      let pct = null;
+      if (positions.length > 0) {
+        const byMarket = new Map(); // conditionId -> [sizeOutcome0, sizeOutcome1]
+        let total = 0;
+        for (const p of positions) {
+          const size = p.size || 0;
+          total += size;
+          const sides = byMarket.get(p.conditionId) || [0, 0];
+          sides[p.outcomeIndex === 0 ? 0 : 1] += size;
+          byMarket.set(p.conditionId, sides);
+        }
+        let hedged = 0;
+        for (const [s0, s1] of byMarket.values()) hedged += 2 * Math.min(s0, s1);
+        pct = total > 0 ? (hedged / total) * 100 : null;
+      }
+      st.hedgeCache.set(addr, pct);
+      return pct;
+    }
+
+    /** Fetch a wallet's global PnL for the three windows. */
+    async function fetchWalletPnl(addr) {
+      if (st.pnlCache.has(addr)) return st.pnlCache.get(addr);
+
+      const series = async (interval, fidelity) => {
+        const data = await fetchJson(
+          `${PNL_API}/user-pnl?user_address=${addr}&interval=${interval}&fidelity=${fidelity}`
+        );
+        if (!Array.isArray(data) || data.length === 0) return null;
+        return data;
+      };
+
+      const [w7, w30, wAll] = [
+        await series('1w', '1h'),
+        await series('1m', '1d'),
+        await series('max', '1d'),
+      ];
+
+      const delta = (s) => (s ? s[s.length - 1].p - s[0].p : null);
+      const result = {
+        d7: delta(w7),
+        d30: delta(w30),
+        all: wAll ? wAll[wAll.length - 1].p : null, // cumulative series → last point = lifetime PnL
+        firstTs: wAll && wAll[0] ? wAll[0].t : null, // series starts at the wallet's first trade
+      };
+      st.pnlCache.set(addr, result);
+      return result;
+    }
+
+    /** Win metrics, reconstructed from the wallet's global trade/redeem history:
+     *  - volume     lifetime traded USD (leaderboard API) → ROI = all-time PnL / volume
+     *  - winRate    % of closed bets that ended profitable
+     *  - avgWinPct  mean % return on the winning bets (500%+ ⇒ longshot hunter)
+     *
+     *  A "bet" = all activity in one market: cost = buys, proceeds = sells + redeems
+     *  (REDEEM events carry no outcome, so market-level books are the reliable unit -
+     *  this also nets out hedged wallets correctly). A bet is closed when it was fully
+     *  traded out, redeemed, or is no longer among the wallet's open positions
+     *  (resolved worthless). Still-open bets are ignored. History is capped at
+     *  ACTIVITY_MAX_PAGES pages; with a truncated history, dangling positions are
+     *  skipped instead of guessed. */
+    async function fetchWalletWinMetrics(addr, deep = false, onProgress = null) {
+      const cached = st.winCache.get(addr);
+      // a deep request only reuses the cache if it already covers the full history
+      if (cached && (!deep || cached.complete)) return cached;
+
+      // deep loads keep their fetched history, so the next deep call resumes where
+      // the previous one stopped instead of starting over
+      const resume = deep && cached && cached.acts ? cached : null;
+
+      let volume = null;
+      if (resume) {
+        volume = resume.volume;
+      } else {
+        const lb = await fetchJson(`${LB_API}/volume?window=all&limit=1&address=${addr}`);
+        volume = Array.isArray(lb) && lb[0] && typeof lb[0].amount === 'number' ? lb[0].amount : null;
+      }
+
+      // walk history newest→oldest with an end-timestamp cursor (the offset param
+      // is capped at 3,000 by the API; the cursor has no such limit)
+      const maxPages = deep ? DEEP_ACTIVITY_MAX_PAGES : ACTIVITY_MAX_PAGES;
+      const acts = resume ? [...resume.acts] : [];
+      const seenEv = new Set(acts.map(evKey));
+      let cursor = resume ? resume.oldestCursor : null;
+      let exhausted = false;
+      for (let p = 0; p < maxPages; p++) {
+        if (st.cancelled) break;
+        const page = await fetchJson(
+          `${DATA}/activity?user=${addr}&limit=${ACTIVITY_PAGE_SIZE}` + (cursor != null ? `&end=${cursor}` : '')
+        );
+        if (!Array.isArray(page) || page.length === 0) {
+          exhausted = true;
+          break;
+        }
+        for (const a of page) {
+          // the cursor is inclusive, so boundary events repeat across pages
+          const k = evKey(a);
+          if (seenEv.has(k)) continue;
+          seenEv.add(k);
+          acts.push({
+            type: a.type, side: a.side, size: a.size, usdcSize: a.usdcSize,
+            conditionId: a.conditionId, timestamp: a.timestamp, title: a.title,
+            eventSlug: a.eventSlug, transactionHash: a.transactionHash, asset: a.asset,
+          });
+        }
+        if (onProgress) onProgress(acts.length);
+        if (page.length < ACTIVITY_PAGE_SIZE) {
+          exhausted = true;
+          break;
+        }
+        const oldest = page[page.length - 1].timestamp;
+        cursor = oldest === cursor ? oldest - 1 : oldest; // same-second flood guard
+      }
+      const truncated = !exhausted;
+
+      // markets the wallet currently holds a position in, with enough detail to
+      // spot "decided but unclaimed" bets: dead losers held open to dodge the
+      // win-rate hit, and resolved wins that just haven't been redeemed yet
+      const posByMarket = new Map(); // conditionId -> {value, redeemable, allDead}
+      const positions = await fetchJson(`${DATA}/positions?user=${addr}&limit=500`);
+      if (Array.isArray(positions)) {
+        for (const p of positions) {
+          let m = posByMarket.get(p.conditionId);
+          if (!m) {
+            m = { value: 0, redeemable: false, allDead: true };
+            posByMarket.set(p.conditionId, m);
+          }
+          m.value += p.currentValue || 0;
+          if (p.redeemable) m.redeemable = true;
+          if (!(typeof p.percentPnl === 'number' && p.percentPnl <= DEAD_POSITION_PCT)) m.allDead = false;
+        }
+      }
+
+      const books = new Map(); // conditionId -> {cost, proceeds, shares, redeemed}
+      const dirty = new Set(); // markets with split/merge/convert → cost basis unreliable
+      for (const a of acts) {
+        if (a.type !== 'TRADE' && a.type !== 'REDEEM') {
+          if (a.conditionId) dirty.add(a.conditionId);
+          continue;
+        }
+        let b = books.get(a.conditionId);
+        if (!b) {
+          b = { cost: 0, proceeds: 0, shares: 0, redeemed: false, oldest: null, title: '', eventSlug: '', ts: 0 };
+          books.set(a.conditionId, b);
+        }
+        // acts stream newest→oldest, so the last event written is the oldest seen
+        b.oldest = a;
+        if (!b.title && a.title) b.title = a.title;
+        if (!b.eventSlug && a.eventSlug) b.eventSlug = a.eventSlug;
+        if (a.timestamp > b.ts) b.ts = a.timestamp;
+        if (a.type === 'REDEEM') {
+          b.proceeds += a.usdcSize || a.size || 0; // winning shares pay $1 each
+          b.shares -= a.size || 0;
+          b.redeemed = true;
+        } else if (a.side === 'BUY') {
+          b.cost += a.usdcSize || 0;
+          b.shares += a.size || 0;
+        } else {
+          b.proceeds += a.usdcSize || 0;
+          b.shares -= a.size || 0;
+        }
+      }
+
+      let wins = 0, closed = 0, winPctSum = 0;
+      let grossGain = 0, grossLoss = 0; // for the gain/loss (profit factor) ratio
+      const bets = []; // closed bets kept for the per-trader detail view
+      for (const [market, b] of books) {
+        if (b.cost <= 0 || dirty.has(market)) continue;
+        // guards against truncated history understating the cost basis:
+        // negative net shares = we missed buys; and with a truncated window only
+        // score markets whose oldest visible event is a BUY (position opened in-window)
+        if (b.shares < -0.01) continue;
+        if (truncated && !(b.oldest && b.oldest.type === 'TRADE' && b.oldest.side === 'BUY')) continue;
+        const open = posByMarket.get(market);
+        const exited = b.shares < 0.01; // fully sold/redeemed (hhedgers' dead side handled below)
+        // resolved: a redeem happened, or the wallet no longer lists this market
+        // among its open positions (leftover shares expired worthless)
+        const resolved = b.redeemed || (!open && !truncated);
+        // decided but unclaimed: still held, but either every position is ~worthless
+        // (win-rate gaming: losers left open forever) or it's a resolved, redeemable win
+        const decided = !!open && (open.allDead || open.redeemable);
+        if (!exited && !resolved && !decided) continue; // genuinely open - not scored
+        closed++;
+        const residual = !exited && open ? open.value : 0; // ≈0 for dead, ≈$1/share for unclaimed wins
+        const retPct = ((b.proceeds + residual - b.cost) / b.cost) * 100;
+        if (retPct > 0) {
+          wins++;
+          winPctSum += retPct;
+        }
+        const profit = b.proceeds + residual - b.cost;
+        if (profit > 0) grossGain += profit;
+        else grossLoss += -profit;
+        bets.push({
+          title: b.title || 'Market',
+          eventSlug: b.eventSlug,
+          cost: b.cost,
+          profit: b.proceeds + residual - b.cost,
+          retPct,
+          // note: losing positions in resolved markets are also flagged redeemable
+          // (claimable for $0), so "win" needs actual residual value, not the flag
+          status: b.redeemed
+            ? 'redeemed'
+            : exited
+              ? 'traded out'
+              : open
+                ? (open.value > Math.max(1, 0.01 * b.cost) ? 'unclaimed win' : 'held at ~0')
+                : 'expired',
+          ts: b.ts,
+        });
+      }
+      bets.sort((x, y) => y.retPct - x.retPct);
+      // cap kept bets but preserve the extremes of BOTH sort orders (% and $),
+      // or big wallets lose their losses / their big-$-small-% wins
+      let kept = bets;
+      if (bets.length > 200) {
+        const pick = new Set([...bets.slice(0, 100), ...bets.slice(-100)]);
+        const byProfit = [...bets].sort((x, y) => y.profit - x.profit);
+        for (const b of [...byProfit.slice(0, 50), ...byProfit.slice(-50)]) pick.add(b);
+        kept = [...pick];
+      }
+
+      const metrics = {
+        volume,
+        closedBets: closed,
+        wonBets: wins,
+        winRate: closed >= 3 ? (wins / closed) * 100 : null, // need a minimal sample
+        avgWinPct: wins > 0 ? winPctSum / wins : null,
+        grossGain,
+        grossLoss,
+        // gain/loss ratio (profit factor): 1.11 = gives back 90% of gains; ∞ = no losses yet
+        plRatio: closed >= 3 ? (grossLoss > 0 ? grossGain / grossLoss : grossGain > 0 ? Infinity : null) : null,
+        bets: kept,
+        eventsScanned: acts.length,
+        complete: exhausted, // pagination ended naturally → this IS the full history
+        deepRan: deep, // a deep load happened; if still incomplete, offer "load more"
+        oldestCursor: cursor, // resume point for the next deep call
+        acts: deep ? acts : undefined, // kept only for deep loads (memory) to allow resuming
+      };
+      st.winCache.set(addr, metrics);
+      return metrics;
+    }
+
+    /* ---------------- ranking ---------------- */
+
+    /** Rank the candidate wallets and run them through every filter, fetching
+     *  profile stats / PnL / win metrics as needed. Rejected wallets don't count
+     *  toward topN - it keeps walking down the ranking until the quota is full.
+     *  Returns the accepted rows (unsorted). */
+    async function rankWallets({ agg, mode, topN: topIn = 100, filters, eventIds = [], copierStats = new Map() }) {
+      // a pasted wallet list is deliberate, so it is analysed in full - the cap
+      // only exists to bound open-ended market discovery
+      const topN = mode === 'csv' ? agg.size : Math.min(100, Math.max(5, parseInt(topIn, 10) || 100));
+      const f = normalizeFilters(filters);
+      const pnlFilterOn =
+        f.exRed.d7 || f.exRed.d30 || f.exRed.all ||
+        Object.values(f.bounds).some((b) => b.min != null || b.max != null);
+      const winFilterOn = f.minRoi != null || f.minWinRate != null || f.minAvgWin != null || f.minPlRatio != null;
+      const tradeCountFilterOn = f.minTrades != null || f.maxTrades != null;
+      const ageFilterOn = f.minAge != null || f.maxAge != null;
+      const anyFilter =
+        f.maxViews != null || f.maxArb != null || pnlFilterOn || winFilterOn || tradeCountFilterOn || ageFilterOn;
+
+      // rank: traded USD volume (trades mode), shares held (holders mode), or a
+      // blend (hybrid: shares valued at ~$0.50 each so holders-only whales rank too)
+      const ranked = [...agg.entries()]
+        .map(([addr, a]) => ({
+          addr,
+          ...a,
+          score:
+            mode === 'holders' ? a.shares :
+            mode === 'hybrid' ? a.vol + a.shares * 0.5 :
+            a.vol,
+          arbPct: a.trades > 0 ? (a.opp / a.trades) * 100 : null,
+        }))
+        .sort((x, y) => y.score - x.score || y.trades - x.trades);
+
+      // With filters on we walk further down the ranking, skipping rejected
+      // wallets, until the quota is filled (checking up to 5× topN candidates).
+      const candidates =
+        mode === 'csv'
+          ? ranked
+          : ranked.slice(0, anyFilter ? Math.min(ranked.length, Math.max(topN * 5, 300)) : topN);
+
+      setStatus(`Found ${agg.size.toLocaleString()} wallets - analyzing top ${Math.min(topN, candidates.length)}…`, 42);
+
+      let accepted = 0;
+      let skipped = 0;
+      const rows = [];
+      const progress = () => {
+        setStatus(
+          anyFilter
+            ? `Analyzing wallets… ${accepted}/${topN} kept · ${skipped} skipped by filters`
+            : `Analyzing wallet PnL… ${accepted}/${Math.min(topN, candidates.length)}`,
+          42 + (accepted / Math.min(topN, candidates.length)) * 58
+        );
+      };
+
+      await pool(candidates, PNL_CONCURRENCY, async (w) => {
+        if (accepted >= topN) return; // quota already filled
+
+        // 1. arb/hedger gate - trades mode: free (trade stances already counted)
+        if (f.maxArb != null && w.arbPct != null && w.arbPct > f.maxArb) {
+          skipped++;
+          progress();
+          return;
+        }
+
+        // 2. profile gates (views + lifetime trade count) - 1 cheap call before the 3 PnL calls
+        const stats = await fetchWalletStats(w.addr);
+        const views = stats ? stats.views : null;
+        const lifeTrades = stats && typeof stats.trades === 'number' ? stats.trades : null;
+        if (f.maxViews != null && (views == null || views > f.maxViews)) {
+          skipped++;
+          progress();
+          return;
+        }
+        if (
+          (f.minTrades != null && (lifeTrades == null || lifeTrades < f.minTrades)) ||
+          (f.maxTrades != null && (lifeTrades == null || lifeTrades > f.maxTrades))
+        ) {
+          skipped++;
+          progress();
+          return;
+        }
+
+        // 2b. arb/hedger gate - holders mode: check the wallet's own positions
+        // for both-sides holdings in this event (1 call per wallet)
+        if (mode === 'holders' && f.maxArb != null) {
+          w.arbPct = await fetchWalletHedgePct(w.addr, eventIds);
+          if (w.arbPct != null && w.arbPct > f.maxArb) {
+            skipped++;
+            progress();
+            return;
+          }
+        }
+
+        // 3. PnL gates (red exclusions + min/max bounds)
+        const pnl = await fetchWalletPnl(w.addr);
+        if (pnlFilterOn && !pnlPasses(pnl, f)) {
+          skipped++;
+          progress();
+          return;
+        }
+
+        // 3b. wallet age gate (days since first trade, from the lifetime PnL series)
+        const ageDays = pnl.firstTs ? (Date.now() / 1000 - pnl.firstTs) / 86400 : null;
+        if (
+          (f.minAge != null && (ageDays == null || ageDays < f.minAge)) ||
+          (f.maxAge != null && (ageDays == null || ageDays > f.maxAge))
+        ) {
+          skipped++;
+          progress();
+          return;
+        }
+
+        // 4. win-metric gates (ROI / win rate / avg win %) - opt-in, extra calls
+        let win = null;
+        if (f.winMetricsOn) {
+          win = await fetchWalletWinMetrics(w.addr);
+          win.roi = win.volume > 0 && pnl.all != null ? (pnl.all / win.volume) * 100 : null;
+          const rejected =
+            (f.minRoi != null && (win.roi == null || win.roi < f.minRoi)) ||
+            (f.minWinRate != null && (win.winRate == null || win.winRate < f.minWinRate)) ||
+            (f.minAvgWin != null && (win.avgWinPct == null || win.avgWinPct < f.minAvgWin)) ||
+            (f.minPlRatio != null && (win.plRatio == null || win.plRatio < f.minPlRatio));
+          if (rejected) {
+            skipped++;
+            progress();
+            return;
+          }
+        }
+
+        if (accepted >= topN) return;
+        accepted++;
+        rows.push({
+          addr: w.addr,
+          name: w.name,
+          img: w.img,
+          vol: w.vol,
+          trades: w.trades,
+          shares: w.shares,
+          arbPct: w.arbPct,
+          markets: w.markets.size,
+          views,
+          lifeTrades,
+          ageDays,
+          d7: pnl.d7,
+          d30: pnl.d30,
+          all: pnl.all,
+          roi: win ? win.roi : null,
+          winRate: win ? win.winRate : null,
+          avgWin: win ? win.avgWinPct : null,
+          plRatio: win ? win.plRatio : null,
+          closedBets: win ? win.closedBets : null,
+          ...(mode === 'copier' && copierStats.has(w.addr)
+            ? (() => {
+                const s = copierStats.get(w.addr);
+                return { follows: s.follows, leadBefore: s.before, medDelay: s.medDelay, confident: s.confident };
+              })()
+            : {}),
+        });
+        progress();
+      });
+      if (st.cancelled) throw new Error('cancelled');
+      return rows;
+    }
+
+    return {
+      state: st,
+      cancel() { st.cancelled = true; },
+      reset() { st.cancelled = false; },
+      fetchJson,
+      loadEvent,
+      loadCategoryEvent,
+      loadBtcEvent,
+      loadGambleEvent,
+      loadCopierScan,
+      scanMarkets,
+      fetchWalletStats,
+      fetchWalletPnl,
+      fetchWalletWinMetrics,
+      rankWallets,
+    };
+  }
+
+  const api = {
+    CATEGORY_LABELS,
+    CAT_WINDOWS,
+    BTC_TIMEFRAMES,
+    WALLET_PRESETS,
+    parseAddresses,
+    parseInput,
+    fmtUsd,
+    shortAddr,
+    fmtCount,
+    depthMode,
+    marketsFromEvent,
+    normalizeFilters,
+    pnlPasses,
+    aggregateWallets,
+    pickBets,
+    rowsToCsv,
+    createScanner,
+  };
+
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  else root.MarkyCore = api;
+})(typeof globalThis !== 'undefined' ? globalThis : this);

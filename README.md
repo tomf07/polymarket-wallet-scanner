@@ -1,10 +1,14 @@
 # MarkyScan - Polymarket Wallet Profitability Scanner
 
-Three scan modes (main tabs):
+Runs in the browser or from the command line ([CLI](#command-line) - same scans, same filters).
+
+Scan modes (main tabs):
 
 - **Event scan** - paste a Polymarket event/market link, scan that event's wallets.
 - **Best of category** - pick a category (Sports, Politics, Crypto, Esports, Pop culture, …) and MarkyScan pulls the category's top N open events by 24h volume (default 10, max 30), takes up to 12 highest-volume markets per event, and runs the exact same wallet pipeline and filters across all of them. The markets list shows one chip per event - untick to exclude that whole event and re-rank.
 - **BTC up/down** - scans *every* Bitcoin Up-or-Down market of a chosen time-frame (5m / 15m / 1h / 4h / daily) in the lookback window (default 24h → 288 five-minute markets; capped at 300 markets). Slugs are deterministic (`btc-updown-5m-{unix}`, `btc-updown-4h-{unix}`, ET-date slugs for hourly/daily), resolved in batched gamma lookups, then the standard pipeline runs. The "Markets" column becomes a regularity signal - how many time-slots the wallet traded. Tip: the **Arb % filter** matters most here; the top of the board is usually hedge bots trading both Up and Down.
+
+- **Wallet gambling** - rolls a random category, a random open event in it and one random market from that event, then scans it like any other. **Degen** rolls skip the category's top 100 events by volume and dig through the long tail.
 
 - **Wallet list** - paste a CSV (or any text containing `0x…` addresses, one per line or comma separated) or load a `.csv` file, and MarkyScan skips discovery entirely: it analyses exactly those wallets and ranks them by the usual metrics. Headers, extra columns and junk lines are ignored; duplicates are collapsed. Round-trips with this tool's own CSV export. No cap - every pasted wallet is analysed, so "Max profiles to check" and "Trade scan depth" are hidden in this mode (they only bound open-ended market discovery).
 
@@ -34,17 +38,46 @@ Filters (all combinable; rejected wallets don't count toward the quota - the sca
 
 100% static - plain HTML/CSS/JS calling Polymarket's public, CORS-enabled APIs directly from the browser. No backend, no API keys, no build step.
 
+## Command line
+
+Everything the web app does also works in a terminal. Needs Node 18+, no dependencies, no API keys.
+
+```sh
+node cli.js --help
+# or put `markyscan` on your PATH:
+npm link
+```
+
+```sh
+markyscan category sports --events 5 --exclude-red all      # best of category
+markyscan event https://polymarket.com/event/some-event --depth max --top 50
+markyscan btc --tf 15m --hours 48 --max-arb 20              # BTC up/down series
+markyscan random --degen                                    # wallet gambling
+markyscan wallets list.csv --preset grinder --csv ranked.csv
+markyscan copiers 0xabc…123 --window 10                     # who copies this wallet
+markyscan bets 0xabc…123 --full --by usd                    # one trader's receipts
+```
+
+Every web filter has a flag: `--top`, `--depth fast|normal|deep|max|holders`, `--max-views`, `--exclude-red 7d,30d,all`, `--min-7d`/`--max-7d` (and `30d`, `all`), `--min-age`/`--max-age`, `--min-trades`/`--max-trades`, `--max-arb`, `--win-metrics`, `--preset longshot|grinder|roi`, `--min-roi`, `--min-winrate`, `--min-avgwin`, `--min-gl`. Negative values need an `=`: `--min-7d=-500`.
+
+Output is a colour table sorted by 7D PnL (`--sort 30d|all|roi|winrate|gl|…` to change it). `--csv file.csv` writes the same CSV as the web export (`--csv -` for stdout), `--json` prints raw rows, and `--bets 5` prints the biggest wins / worst losses of the top 5 wallets under the table (the web app's ▸ expand). `--exclude <text>` drops matching markets or events before the scan - the CLI version of unticking chips - and `--list-markets` shows what would be scanned without scanning it.
+
+`wallets` takes CSV files, bare addresses, or a list piped into stdin (`cat wallets.txt | markyscan wallets`). Progress goes to stderr, so piping the output somewhere stays clean.
+
 ## Files
 
-| File         | Purpose                        |
-|--------------|--------------------------------|
-| `index.html` | Page structure                 |
-| `styles.css` | Dark theme styling             |
-| `app.js`     | All scanning / ranking logic   |
+| File         | Purpose                                              |
+|--------------|------------------------------------------------------|
+| `index.html` | Page structure                                       |
+| `styles.css` | Dark theme styling                                   |
+| `core.js`    | Scanning / ranking engine, shared by web and CLI     |
+| `app.js`     | Browser UI (forms, table, CSV download)              |
+| `cli.js`     | Command line front-end                               |
+| `build.sh`   | Minified production build into `dist/`               |
 
 ## Deploying
 
-Upload the three files to any static host:
+Upload `index.html`, `styles.css`, `core.js` and `app.js` to any static host (or run `./build.sh` and upload `dist/`):
 
 - **Netlify**: drag the folder into https://app.netlify.com/drop
 - **Vercel**: `vercel` in this folder

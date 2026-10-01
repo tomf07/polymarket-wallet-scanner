@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds the deployable site into dist/ — minified + name-mangled JS/CSS.
-# Deploy ONLY dist/. The readable source (app.js, styles.css) stays private.
+# Deploy ONLY dist/.
 # Works on macOS (local) and Linux (Vercel build machines) — fetches the
 # matching standalone esbuild binary, no Node/npm required.
 set -e
@@ -27,9 +27,14 @@ fi
 
 rm -rf dist
 mkdir dist
-"$ESBUILD" app.js --bundle --minify --format=iife --outfile=dist/app.js --log-level=warning
+# core.js (shared with the CLI) + app.js ship as one file. core.js is minified
+# without a --format so esbuild leaves its module/global export check alone
+# (any format makes it wrap the file as CommonJS and the global never appears)
+"$ESBUILD" core.js --minify --outfile=.build-cache/core.min.js --log-level=warning
+"$ESBUILD" app.js --bundle --minify --format=iife --outfile=.build-cache/app.min.js --log-level=warning
+cat .build-cache/core.min.js .build-cache/app.min.js > dist/app.js
 "$ESBUILD" styles.css --minify --outfile=dist/styles.css --log-level=warning
-cp index.html dist/
+grep -v '<script src="core.js"></script>' index.html > dist/index.html
 
 # content-hashed filenames: every deploy gets fresh asset URLs, so browsers
 # can never pair a new index.html with a stale cached app.js
