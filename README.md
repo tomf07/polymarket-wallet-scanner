@@ -114,3 +114,6 @@ Notes & limitations:
 - 7D/30D PnL = change over the window (last − first point of the series); All-time = last point of the lifetime series.
 - Wallet discovery covers the most recent 500–3,500 trades per market (configurable via "Trade scan depth"; ~3,500 is the public feed's hard ceiling). The trades feed is taker-side fills, so in very high-volume markets older traders may fall outside the window. **Max depth** compensates by also merging in each market's top 100 current holders per outcome - big wallets are found through their positions even when their trades are too old for the feed. Ranking in Max mode blends traded volume with held shares (valued at $0.50/share).
 - The public APIs are rate-limited; the scanner throttles itself (5 markets / 8 wallets in parallel) and retries with backoff on 429s. Big events with "Top 400" can take a couple of minutes.
+
+
+If you found this project useful, please leave a star :)
